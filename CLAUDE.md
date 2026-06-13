@@ -43,6 +43,8 @@ A few invariants that span files and are easy to break without realizing:
 
 7. **Per-item failures never crash the pipeline by default.** The batch processor catches `LLMError` (and unexpected exceptions) per item and emits `BatchResult(error=...)`. The only way a batch aborts mid-stream is `BatchConfig.on_failure = raise`.
 
+8. **The image fetcher runs upstream of the rate limiter.** `OpenAICompatibleLLM.invoke` does `fetch_images → acquire(RPM bucket) → POST`. This means *fetcher throughput is the effective ceiling on LLM RPM* — if the fetcher's semaphore is saturated, items queue before they ever reach the limiter, and the configured RPM cap becomes unreachable. Concretely: `max_concurrent_downloads ≥ ceil(RPM/60 × avg_images_per_item × avg_fetch_latency_sec)`. The benchmark in [benchmarks/rpm_throughput.py](benchmarks/rpm_throughput.py) demonstrates this — dropping fetcher slots from 64 to 4 (well below the workload's need) cuts steady-state RPM from 1001 to 863 even though the LLM limiter would happily allow more.
+
 ## The batch pipeline
 
 [`batch/processor.py`](src/llm_kit/batch/processor.py) is the hottest code in the repo. Structure:
@@ -67,3 +69,15 @@ The YAML loader walks dataclass fields via `get_type_hints` and recursively cons
 ## Public surface
 
 `from llm_kit import ...` exposes `AppConfig`, `BaseLLM`, `OpenAICompatibleLLM`, `Message`, `BatchItem`, `BatchResult`, `LLMResponse`, and the full error hierarchy. Treat anything outside that list as internal — feel free to refactor freely.
+
+## Benchmarks
+
+[benchmarks/rpm_throughput.py](benchmarks/rpm_throughput.py) is the load-test for the limiter + image fetcher pipeline. It runs a real `OpenAICompatibleLLM` against an `httpx.MockTransport` whose chat handler sleeps a configurable latency. Use it to validate any changes to `rate_limit/`, `images/`, or the request path in `llm/openai_compat.py`.
+
+Flags worth knowing:
+- `--items N` — batch size (default 10000; a 1000-RPM run with this default takes ~10 min)
+- `--no-cache` — sets `ImageConfig.cache_size = 0`, forcing every image reference to fetch
+- `--image-latency 0.1` — adds 100ms per-image sleep in the mock handler (CDN-like)
+- `--max-image-downloads 4` — drops `ImageConfig.max_concurrent_downloads` to force fetcher saturation
+
+The output reports overall RPM, sliding-60s window stats, and inter-arrival percentiles. Use the sliding-60s **median** (not the overall RPM) to read steady-state behavior — the token bucket starts full, so the first minute always bursts above the cap by design.
