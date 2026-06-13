@@ -36,6 +36,26 @@ def test_load_example_config_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.http.llm_retry.max_retries == 5
 
 
+def test_provider_batch_defaults_and_yaml_override(tmp_path: Path) -> None:
+    # Defaults present without any YAML section.
+    assert AppConfig().provider_batch.completion_window == "24h"
+    assert AppConfig().provider_batch.batches_path == "/v1/batches"
+
+    path = _write(
+        tmp_path,
+        """
+        provider_batch:
+          completion_window: 48h
+          poll_interval_seconds: 5.0
+          max_requests_per_batch: 1000
+        """,
+    )
+    cfg = AppConfig.from_yaml(path)
+    assert cfg.provider_batch.completion_window == "48h"
+    assert cfg.provider_batch.poll_interval_seconds == 5.0
+    assert cfg.provider_batch.max_requests_per_batch == 1000
+
+
 def test_env_var_interpolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_MODEL", "from-env")
     path = _write(

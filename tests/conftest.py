@@ -15,6 +15,7 @@ from llm_kit.config.embed import EmbeddingConfig
 from llm_kit.config.http import HTTPConfig, RetryConfig
 from llm_kit.config.image import ImageConfig
 from llm_kit.config.llm import LLMConfig
+from llm_kit.config.provider_batch import ProviderBatchConfig
 from llm_kit.config.rate_limit import RateLimitConfig
 from llm_kit.llm.base import BaseLLM
 from llm_kit.llm.client import LLMClient
@@ -61,6 +62,7 @@ def make_config(**overrides: Any) -> AppConfig:
             ),
         ),
         batch=BatchConfig(worker_concurrency=4, input_buffer_size=8, progress_log_every=0),
+        provider_batch=ProviderBatchConfig(poll_interval_seconds=0.0),
     )
     for key, value in overrides.items():
         setattr(cfg, key, value)

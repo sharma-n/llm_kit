@@ -31,6 +31,18 @@ that test, not by raw capability gap.
   and `benchmarks/embed_throughput.py`. RAG storage/retrieval was explicitly
   scoped **out** — see the "Identity fork" section to take it further.
 
+- **Provider-native batch API (the "offline" driver).** [`provider_batch/`](src/llm_kit/provider_batch/):
+  submit a whole `list[BatchItem]` to a provider's 24h async batch endpoint, poll,
+  download, and reconcile into the same `BatchResult`s the live pipeline yields.
+  Same input/output contracts as `batch/`, entirely different middle (no worker
+  pool, no rate limiter). Two axes: request/response *bodies* reuse the formatter
+  + `parse_response`; *transport* is a `BatchBackend` selected by `message_format`.
+  Surface: `LLMClient.submit_batch` / `poll_batch` / `fetch_batch_results` /
+  `run_batch_api`, with a persistent `BatchJob` handle for cross-process resume.
+  **OpenAI is fully wired + tested**; Anthropic + Gemini backends are scaffolded
+  (inline transport, mock-tested only, **unverified against live APIs**). Cost
+  accounting + response caching (the next two items) remain open.
+
 - **Provider formatters — Anthropic + Gemini.** `AnthropicFormatter` and
   `GeminiFormatter` in [`messages/formatter.py`](src/llm_kit/messages/formatter.py),
   selected via `LLMConfig.message_format` (`openai` / `anthropic` / `gemini`). Each
@@ -51,11 +63,11 @@ reliable, or more resumable, and each reuses `http/session`, `http/retry`,
 `rate_limit`, the error hierarchy, and the batch pipeline almost verbatim. This
 is the recommended near-term order.
 
-1. **Provider-native batch API (the "fourth sink").** The most on-brand item in
-   the whole roadmap. Same `BatchItem` list (alongside stream/jsonl/callback):
-   submit to OpenAI/Anthropic 24h async batch endpoints (~50% cheaper), poll,
-   reconcile. Purely a batch concern, complementary to the existing client-side
-   concurrency, and a capability general frameworks don't really own.
+1. ~~**Provider-native batch API.**~~ ✅ **Done** (OpenAI wired; Anthropic/Gemini
+   scaffolded) — see the Done section. Framed as a *separate driver*, not a
+   "fourth sink": it shares `BatchItem`/`BatchResult` but not the live pipeline's
+   worker pool or rate limiter. Anthropic/Gemini backends still need live-API
+   verification before they can be promoted out of scaffold status.
 2. **Cost & usage accounting.** Aggregate the per-response `TokenUsage` (already
    collected and trued-up) into a priced ledger per batch, priced from config.
    Turns "throughput" into "throughput you can budget." Small, additive, and a

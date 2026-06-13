@@ -7,31 +7,46 @@ Select the formatter via ``LLMConfig.message_format``.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import time
 from collections.abc import AsyncIterable, AsyncIterator
+from pathlib import Path
 from typing import Any, Self
 
 import httpx
 from pydantic import BaseModel
-from pydantic import ValidationError as PydanticValidationError
 
 from llm_kit.batch.processor import run_batch_stream
 from llm_kit.config.app import AppConfig
 from llm_kit.config.llm import MessageFormat
-from llm_kit.errors import AuthError, LLMError, ProviderError, ValidationError
+from llm_kit.errors import AuthError, LLMError, ProviderError
 from llm_kit.http.retry import retry_request
 from llm_kit.http.session import build_async_client
 from llm_kit.images.fetcher import ImageFetcher
 from llm_kit.llm.base import BaseLLM
-from llm_kit.llm.response import BatchItem, BatchResult, LLMResponse, TokenUsage
+from llm_kit.llm.parsing import parse_response
+from llm_kit.llm.response import BatchItem, BatchResult, LLMResponse
 from llm_kit.messages.formatter import AnthropicFormatter, GeminiFormatter, OpenAIFormatter
 from llm_kit.messages.types import Message
+from llm_kit.provider_batch.driver import build_backend, reconcile, serialize_items
+from llm_kit.provider_batch.job import BatchJob
+from llm_kit.provider_batch.types import BatchJobStatus
 from llm_kit.rate_limit.limiter import RateLimiter, TokenEstimator
 
 logger = logging.getLogger(__name__)
+
+
+async def _skip_completed(
+    results: AsyncIterator[BatchResult], completed: set[str]
+) -> AsyncIterator[BatchResult]:
+    """Drop results whose id is already present in the output jsonl."""
+    async for result in results:
+        if result.id in completed:
+            continue
+        yield result
 
 
 class LLMClient(BaseLLM):
@@ -63,6 +78,7 @@ class LLMClient(BaseLLM):
         self._images = ImageFetcher(self._client, config.image)
         self._limiter = RateLimiter(config.rate_limit, token_estimator=token_estimator)
         self._api_key = self._resolve_api_key(config.llm)
+        self._batch_backend = build_backend(config, self._client, self._api_key)
 
     # ------------------------------------------------------------------ public
 
@@ -77,10 +93,7 @@ class LLMClient(BaseLLM):
         response_model: type[BaseModel] | None = None,
         overrides: dict[str, Any] | None = None,
     ) -> LLMResponse:
-        encoded = await self._images.fetch_many(
-            [u for m in messages for u in m.image_urls]
-        )
-        body = self._build_body(messages, encoded, response_model, overrides)
+        body = await self._build_request_body(messages, response_model, overrides)
 
         estimated = self._limiter.estimate_tokens(messages)
         started = time.perf_counter()
@@ -98,19 +111,13 @@ class LLMClient(BaseLLM):
 
         elapsed = time.perf_counter() - started
         data = self._parse_json(response)
-        parsed_obj, text = self._extract_content(data, response_model)
-        usage = self._extract_usage(data)
-        self._limiter.true_up_tokens(estimated=estimated, actual=usage.total_tokens)
-
-        return LLMResponse(
-            text=text,
-            parsed=parsed_obj,
-            usage=usage,
-            model=data.get("model"),
-            finish_reason=self._formatter.finish_reason(data),
-            raw=data,
-            latency_seconds=elapsed,
+        result = parse_response(
+            data, response_model, self._formatter, latency_seconds=elapsed
         )
+        self._limiter.true_up_tokens(
+            estimated=estimated, actual=result.usage.total_tokens
+        )
+        return result
 
     def batch_stream(
         self,
@@ -124,6 +131,93 @@ class LLMClient(BaseLLM):
             config=self._config.batch,
             completed_ids=completed_ids,
         )
+
+    # ------------------------------------------------------ provider batch API
+
+    async def submit_batch(self, items: list[BatchItem]) -> BatchJob:
+        """Serialize ``items`` and submit them to the provider's batch endpoint.
+
+        Returns a ``BatchJob`` handle. Call ``handle.save(path)`` to persist it
+        for cross-process resume — the manifest carries each item's metadata, but
+        ``response_model`` (a Python type) is not persisted, so cross-process
+        result validation requires re-supplying ``items`` to ``fetch_batch_results``.
+        """
+        cfg = self._config.provider_batch
+        requests, manifest = await serialize_items(
+            self._build_request_body, items, max_requests=cfg.max_requests_per_batch
+        )
+        batch_id = await self._batch_backend.submit(requests)
+        return BatchJob(
+            provider=str(self._config.llm.message_format),
+            batch_id=batch_id,
+            manifest=manifest,
+        )
+
+    async def poll_batch(self, job: BatchJob) -> BatchJobStatus:
+        """Return a normalized status snapshot for the submitted job."""
+        return await self._batch_backend.poll(job.batch_id)
+
+    async def fetch_batch_results(
+        self, job: BatchJob, *, items: list[BatchItem] | None = None
+    ) -> AsyncIterator[BatchResult]:
+        """Download and reconcile results for ``job`` into ``BatchResult``s.
+
+        ``response_model`` validation is applied only for ids present in
+        ``items``; otherwise results come back as raw text. Metadata is always
+        restored from the job manifest.
+        """
+        status = await self._batch_backend.poll(job.batch_id)
+        response_models = (
+            {it.id: it.response_model for it in items} if items else {}
+        )
+        metadata = {cid: job.metadata_for(cid) for cid in job.manifest}
+        raw = self._batch_backend.fetch_results(status)
+        async for result in reconcile(
+            raw, self._formatter, response_models=response_models, metadata=metadata
+        ):
+            yield result
+
+    async def run_batch_api(
+        self,
+        items: list[BatchItem],
+        output_path: str | Path,
+        *,
+        poll_interval: float | None = None,
+        resume_job: BatchJob | None = None,
+    ) -> int:
+        """Submit, poll to completion, and write reconciled results to jsonl.
+
+        A convenience that holds the process open across the job's lifetime. Pass
+        ``resume_job`` (e.g. ``BatchJob.load(path)``) to reconnect to an already
+        submitted job instead of submitting again. Two-level resume: the saved
+        handle reconnects to the in-flight job, and ids already present in
+        ``output_path`` are skipped on write.
+        """
+        from llm_kit.batch.jsonl import load_completed_ids, write_results_to_jsonl
+
+        interval = (
+            poll_interval
+            if poll_interval is not None
+            else self._config.provider_batch.poll_interval_seconds
+        )
+        job = resume_job or await self.submit_batch(items)
+
+        status = await self._batch_backend.poll(job.batch_id)
+        while not status.state.is_terminal:
+            await asyncio.sleep(interval)
+            status = await self._batch_backend.poll(job.batch_id)
+
+        path = Path(output_path)
+        completed = load_completed_ids(path) if path.exists() else set()
+        if completed:
+            logger.info("resuming: %d items already in %s", len(completed), path)
+        response_models = {it.id: it.response_model for it in items}
+        metadata = {cid: job.metadata_for(cid) for cid in job.manifest}
+        raw = self._batch_backend.fetch_results(status)
+        results = reconcile(
+            raw, self._formatter, response_models=response_models, metadata=metadata
+        )
+        return await write_results_to_jsonl(path, _skip_completed(results, completed))
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -150,6 +244,22 @@ class LLMClient(BaseLLM):
         headers.update(self._formatter.default_headers(self._api_key))
         headers.update(self._config.llm.extra_headers)
         return headers
+
+    async def _build_request_body(
+        self,
+        messages: list[Message],
+        response_model: type[BaseModel] | None,
+        overrides: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Fetch+inline images and assemble the provider request body.
+
+        Shared by the live ``invoke`` path and the provider-batch serializer so
+        both produce byte-identical request bodies for the same item.
+        """
+        encoded = await self._images.fetch_many(
+            [u for m in messages for u in m.image_urls]
+        )
+        return self._build_body(messages, encoded, response_model, overrides)
 
     def _build_body(
         self,
@@ -186,30 +296,5 @@ class LLMClient(BaseLLM):
             raise ProviderError(f"unexpected response shape: {type(data).__name__}")
         return data
 
-    def _extract_content(
-        self,
-        data: dict[str, Any],
-        response_model: type[BaseModel] | None,
-    ) -> tuple[BaseModel | None, str]:
-        text = self._formatter.extract_text(data)
-        if response_model is None:
-            return None, text
-        try:
-            parsed = response_model.model_validate_json(text)
-        except PydanticValidationError as exc:
-            raise ValidationError(
-                f"response did not match {response_model.__name__}: {exc.errors()}",
-                raw_content=text,
-                cause=exc,
-            ) from exc
-        return parsed, text
-
-    def _extract_usage(self, data: dict[str, Any]) -> TokenUsage:
-        prompt, completion, total = self._formatter.extract_usage(data)
-        return TokenUsage(
-            prompt_tokens=prompt,
-            completion_tokens=completion,
-            total_tokens=total,
-        )
 
 __all__ = ["AuthError", "LLMClient", "LLMError"]

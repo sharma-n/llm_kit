@@ -17,13 +17,18 @@ from llm_kit.llm.base import BaseLLM
 from llm_kit.llm.client import LLMClient
 from llm_kit.llm.response import BatchItem, BatchResult, LLMResponse
 from llm_kit.messages.types import Message
+from llm_kit.provider_batch.job import BatchJob
+from llm_kit.provider_batch.types import BatchJobStatus, BatchState
 
 __all__ = [
     "AppConfig",
     "AuthError",
     "BaseLLM",
     "BatchItem",
+    "BatchJob",
+    "BatchJobStatus",
     "BatchResult",
+    "BatchState",
     "EmbedItem",
     "EmbeddingResponse",
     "EmbeddingResult",

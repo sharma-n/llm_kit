@@ -16,6 +16,7 @@ from llm_kit.config.embed import EmbeddingConfig
 from llm_kit.config.http import HTTPConfig
 from llm_kit.config.image import ImageConfig
 from llm_kit.config.llm import LLMConfig
+from llm_kit.config.provider_batch import ProviderBatchConfig
 from llm_kit.config.rate_limit import RateLimitConfig
 
 
@@ -32,6 +33,7 @@ class AppConfig:
     rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
     image: ImageConfig = field(default_factory=ImageConfig)
     batch: BatchConfig = field(default_factory=BatchConfig)
+    provider_batch: ProviderBatchConfig = field(default_factory=ProviderBatchConfig)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> Self:
