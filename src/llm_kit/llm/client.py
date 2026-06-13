@@ -28,7 +28,7 @@ from llm_kit.http.session import build_async_client
 from llm_kit.images.fetcher import ImageFetcher
 from llm_kit.llm.base import BaseLLM
 from llm_kit.llm.parsing import parse_response
-from llm_kit.llm.response import BatchItem, BatchResult, LLMResponse
+from llm_kit.llm.response import BatchItem, BatchResult, BatchSummary, LLMResponse
 from llm_kit.messages.formatter import AnthropicFormatter, GeminiFormatter, OpenAIFormatter
 from llm_kit.messages.types import Message
 from llm_kit.provider_batch.driver import build_backend, reconcile, serialize_items
@@ -131,6 +131,21 @@ class LLMClient(BaseLLM):
             config=self._config.batch,
             completed_ids=completed_ids,
         )
+
+    async def batch_to_jsonl(
+        self,
+        items: AsyncIterable[BatchItem] | list[BatchItem],
+        output_path: str | Path,
+        *,
+        resume: bool = True,
+    ) -> BatchSummary:
+        summary = await super().batch_to_jsonl(items, output_path, resume=resume)
+        llm_cfg = self._config.llm
+        summary.estimated_cost = (
+            summary.prompt_tokens / 1_000_000 * llm_cfg.prompt_cost_per_1m_tokens
+            + summary.completion_tokens / 1_000_000 * llm_cfg.completion_cost_per_1m_tokens
+        )
+        return summary
 
     # ------------------------------------------------------ provider batch API
 

@@ -15,8 +15,9 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from llm_kit.batch.ledger import UsageLedger
 from llm_kit.errors import LLMError
-from llm_kit.llm.response import BatchItem, BatchResult, LLMResponse
+from llm_kit.llm.response import BatchItem, BatchResult, BatchSummary, LLMResponse
 from llm_kit.messages.types import Message
 
 logger = logging.getLogger(__name__)
@@ -53,8 +54,8 @@ class BaseLLM(ABC):
         output_path: str | Path,
         *,
         resume: bool = True,
-    ) -> int:
-        """Stream results to ``output_path`` (jsonl). Returns total items written.
+    ) -> BatchSummary:
+        """Stream results to ``output_path`` (jsonl). Returns a BatchSummary.
 
         If ``resume`` and the file exists, completed IDs are loaded from it and
         skipped. The file is opened in append mode; corrupt trailing lines from
@@ -70,10 +71,15 @@ class BaseLLM(ABC):
         if completed:
             logger.info("resuming: %d items already in %s", len(completed), path)
 
-        return await write_results_to_jsonl(
-            path,
-            self.batch_stream(items, completed_ids=completed),
-        )
+        ledger = UsageLedger()
+
+        async def _tracked() -> AsyncIterator[BatchResult]:
+            async for result in self.batch_stream(items, completed_ids=completed):
+                ledger.add(result)
+                yield result
+
+        await write_results_to_jsonl(path, _tracked())
+        return ledger.to_summary()
 
     async def batch_to_callback(
         self,

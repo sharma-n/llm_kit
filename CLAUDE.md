@@ -76,9 +76,17 @@ Note that batch concurrency (`BatchConfig.worker_concurrency`) is *not* the same
 
 The YAML loader walks dataclass fields via `get_type_hints` and recursively constructs nested dataclasses, enums (`StrEnum`), tuples, lists, and dicts. `${VAR}` / `${VAR:-default}` interpolation happens **after** YAML parsing and runs only on string values — so `${VAR}` inside a YAML comment is ignored. Putting interpolation back into the pre-parse stage will reintroduce that bug.
 
+## Cost & usage accounting
+
+[`batch/ledger.py`](src/llm_kit/batch/ledger.py) provides `UsageLedger`, a mutable accumulator for token usage across a batch run. `BaseLLM.batch_to_jsonl` uses it internally and now returns a `BatchSummary` (total items, ok/error counts, token totals, estimated cost) instead of a bare `int`.
+
+`LLMClient` overrides `batch_to_jsonl` to inject pricing from `LLMConfig.prompt_cost_per_1m_tokens` and `LLMConfig.completion_cost_per_1m_tokens` (both default to `0.0`, so accounting is fully opt-in). Pricing is not in the API response — providers only return token counts — so set these fields to the provider's published per-token rates in your YAML config.
+
+For streaming use (`batch_stream`), construct a `UsageLedger` yourself and call `.add(result)` per iteration, then `.to_summary(prompt_cost_per_1m=..., completion_cost_per_1m=...)` when done.
+
 ## Public surface
 
-`from llm_kit import ...` exposes `AppConfig`, `BaseLLM`, `LLMClient`, `OpenAICompatibleEmbedder`, `Message`, `BatchItem`, `BatchResult`, `LLMResponse`, `EmbedItem`, `EmbeddingResponse`, `EmbeddingResult`, `BatchJob`, `BatchJobStatus`, `BatchState`, and the full error hierarchy. Treat anything outside that list as internal — feel free to refactor freely. (The `provider_batch` backends are internal; `LLMClient.submit_batch` / `poll_batch` / `fetch_batch_results` / `run_batch_api` are the surface.)
+`from llm_kit import ...` exposes `AppConfig`, `BaseLLM`, `LLMClient`, `OpenAICompatibleEmbedder`, `Message`, `BatchItem`, `BatchResult`, `BatchSummary`, `LLMResponse`, `EmbedItem`, `EmbeddingResponse`, `EmbeddingResult`, `BatchJob`, `BatchJobStatus`, `BatchState`, `UsageLedger`, and the full error hierarchy. Treat anything outside that list as internal — feel free to refactor freely. (The `provider_batch` backends are internal; `LLMClient.submit_batch` / `poll_batch` / `fetch_batch_results` / `run_batch_api` are the surface.)
 
 ## Benchmarks
 

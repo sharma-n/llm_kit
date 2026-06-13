@@ -45,3 +45,6 @@ class LLMConfig:
 
     message_format: MessageFormat = MessageFormat.OPENAI
     structured_output_style: StructuredOutputStyle = StructuredOutputStyle.OPENAI_JSON_SCHEMA
+
+    prompt_cost_per_1m_tokens: float = 0.0
+    completion_cost_per_1m_tokens: float = 0.0

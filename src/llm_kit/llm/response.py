@@ -60,3 +60,16 @@ class BatchResult:
     @property
     def ok(self) -> bool:
         return self.error is None
+
+
+@dataclass(slots=True)
+class BatchSummary:
+    """Aggregate token usage and estimated cost for a completed batch run."""
+
+    total_items: int = 0
+    ok_count: int = 0
+    error_count: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    estimated_cost: float = 0.0

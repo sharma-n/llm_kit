@@ -13,9 +13,10 @@ from llm_kit.errors import (
     TimeoutError,
     ValidationError,
 )
+from llm_kit.batch.ledger import UsageLedger
 from llm_kit.llm.base import BaseLLM
 from llm_kit.llm.client import LLMClient
-from llm_kit.llm.response import BatchItem, BatchResult, LLMResponse
+from llm_kit.llm.response import BatchItem, BatchResult, BatchSummary, LLMResponse
 from llm_kit.messages.types import Message
 from llm_kit.provider_batch.job import BatchJob
 from llm_kit.provider_batch.types import BatchJobStatus, BatchState
@@ -26,6 +27,7 @@ __all__ = [
     "BaseLLM",
     "BatchItem",
     "BatchJob",
+    "BatchSummary",
     "BatchJobStatus",
     "BatchResult",
     "BatchState",
@@ -40,6 +42,7 @@ __all__ = [
     "LLMClient",
     "OpenAICompatibleEmbedder",
     "ProviderError",
+    "UsageLedger",
     "RateLimitError",
     "TimeoutError",
     "ValidationError",
