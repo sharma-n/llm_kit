@@ -39,9 +39,10 @@ that test, not by raw capability gap.
   + `parse_response`; *transport* is a `BatchBackend` selected by `message_format`.
   Surface: `LLMClient.submit_batch` / `poll_batch` / `fetch_batch_results` /
   `run_batch_api`, with a persistent `BatchJob` handle for cross-process resume.
-  **OpenAI is fully wired + tested**; Anthropic + Gemini backends are scaffolded
-  (inline transport, mock-tested only, **unverified against live APIs**). Cost
-  accounting + response caching (the next two items) remain open.
+  All three backends are implemented against their documented Batch wire formats
+  (OpenAI Files+Batches file-upload; Anthropic Message Batches and Gemini Batch
+  Mode inline) and covered by mock-transport tests — no live-key integration
+  tests in-repo yet. Cost accounting + response caching (the next two items) remain open.
 
 - **Provider formatters — Anthropic + Gemini.** `AnthropicFormatter` and
   `GeminiFormatter` in [`messages/formatter.py`](src/llm_kit/messages/formatter.py),
@@ -61,18 +62,14 @@ that test, not by raw capability gap.
 These pass the test cleanly. Each makes a large job cheaper, faster, more
 reliable, or more resumable, and each reuses `http/session`, `http/retry`,
 `rate_limit`, the error hierarchy, and the batch pipeline almost verbatim. This
-is the recommended near-term order.
+is the recommended near-term order. (The provider-native batch API that used to
+head this list is now shipped — see the Done section.)
 
-1. ~~**Provider-native batch API.**~~ ✅ **Done** (OpenAI wired; Anthropic/Gemini
-   scaffolded) — see the Done section. Framed as a *separate driver*, not a
-   "fourth sink": it shares `BatchItem`/`BatchResult` but not the live pipeline's
-   worker pool or rate limiter. Anthropic/Gemini backends still need live-API
-   verification before they can be promoted out of scaffold status.
-2. **Cost & usage accounting.** Aggregate the per-response `TokenUsage` (already
+1. **Cost & usage accounting.** Aggregate the per-response `TokenUsage` (already
    collected and trued-up) into a priced ledger per batch, priced from config.
    Turns "throughput" into "throughput you can budget." Small, additive, and a
    batch-engine feature rather than framework furniture.
-3. **Response caching / dedup.** Mirror the image-fetcher LRU at the response
+2. **Response caching / dedup.** Mirror the image-fetcher LRU at the response
    layer, keyed by a hash of messages + params. In a 1M batch with repeated
    prompts this is real money saved; the pattern already exists in `images/`.
 
@@ -129,8 +126,8 @@ whenever it starts paying for itself.
 
 ## Suggested order
 
-Provider-native batch API → cost accounting → response caching. These three keep
-the kit firmly in its lane and each one deepens the batch engine. Only *after*
-that, if the project's identity is meant to widen, take up the agent loop or RAG
-as a conscious fork. Cross-cutting infra slots in whenever it starts paying for
-itself.
+Provider-native batch API (✅ done) → cost accounting → response caching. These
+keep the kit firmly in its lane and each one deepens the batch engine. With the
+batch API shipped, cost accounting is next. Only *after* that, if the project's
+identity is meant to widen, take up the agent loop or RAG as a conscious fork.
+Cross-cutting infra slots in whenever it starts paying for itself.

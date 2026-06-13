@@ -1,21 +1,27 @@
-"""Google Gemini batch backend (inline transport). SCAFFOLDED.
+"""Google Gemini Batch Mode backend (inline transport).
 
-.. warning::
-   This backend is **not verified against the live Gemini API** and Gemini's
-   batch surface is the least settled of the three. It exists to keep the
-   ``BatchBackend`` abstraction honest across providers. Field names, the
-   long-running-operation polling shape, and the results envelope below are
-   plausible but unconfirmed — verify against the live API before use. Tests
-   cover envelope wrap/unwrap against canned mock responses only.
+Implements the documented Gemini Batch API
+(https://ai.google.dev/gemini-api/docs/batch-api) for inline requests:
 
-Transport (inline): submit an inline ``requests`` array to a batch endpoint,
-poll the returned operation, then read per-request responses keyed back to each
-item's ``custom_id`` via the request ``metadata.key`` field.
+  - submit:  ``POST /v1beta/models/{model}:batchGenerateContent`` with
+             ``{"batch": {"inputConfig": {"requests": {"requests": [{request, metadata:{key}}]}}}}``;
+             returns a long-running operation whose ``name`` (e.g. ``batches/123``) is the job id.
+  - poll:    ``GET /v1beta/{name}`` → completion via ``metadata.state`` (``JOB_STATE_PENDING`` /
+             ``RUNNING`` / ``SUCCEEDED`` / ``FAILED`` / ``CANCELLED`` / ``EXPIRED``), with the
+             ``done`` boolean as a fallback signal.
+  - results: once succeeded, ``response.inlinedResponses`` is a direct array; each element is
+             ``{response: <GenerateContentResponse>, metadata: {key}}`` or ``{error: <status>}``.
+             Results are correlated back to each item by the ``metadata.key`` we set on submit
+             (the item's custom_id), falling back to array order.
+
+Field casing follows protojson (camelCase and snake_case are both accepted); camelCase is used
+here to match ``GeminiFormatter``. The inner ``request`` body and the succeeded ``response`` are
+produced/parsed by the formatter and ``parse_response``. Verified against the published wire
+format; exercised in-repo by mock-transport tests only (no live-key integration test).
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import AsyncIterator
 from typing import Any
@@ -29,9 +35,19 @@ from llm_kit.provider_batch.types import BatchJobStatus, BatchRequest, BatchStat
 
 logger = logging.getLogger(__name__)
 
+# Gemini long-running-operation job state -> normalized lifecycle state.
+_STATE_MAP: dict[str, BatchState] = {
+    "JOB_STATE_PENDING": BatchState.PENDING,
+    "JOB_STATE_RUNNING": BatchState.IN_PROGRESS,
+    "JOB_STATE_SUCCEEDED": BatchState.COMPLETED,
+    "JOB_STATE_FAILED": BatchState.FAILED,
+    "JOB_STATE_CANCELLED": BatchState.CANCELLED,
+    "JOB_STATE_EXPIRED": BatchState.EXPIRED,
+}
+
 
 class GeminiBatchBackend:
-    """Inline transport against the Gemini batch API. SCAFFOLDED."""
+    """Inline transport against the Gemini Batch API."""
 
     def __init__(self, client: httpx.AsyncClient, config: AppConfig, api_key: str | None) -> None:
         self._client = client
@@ -59,6 +75,7 @@ class GeminiBatchBackend:
             retry=self._config.http.llm_retry,
             operation="batch_create",
         )
+        # The create call returns the long-running operation; its name is the job id.
         return self._parse(response).get("name", "")
 
     async def poll(self, batch_id: str) -> BatchJobStatus:
@@ -69,14 +86,18 @@ class GeminiBatchBackend:
             operation="batch_poll",
         )
         data = self._parse(response)
-        done = bool(data.get("done"))
-        state = BatchState.COMPLETED if done else BatchState.IN_PROGRESS
-        if done and data.get("error"):
-            state = BatchState.FAILED
+        raw_state = str((data.get("metadata") or {}).get("state", ""))
+        state = _STATE_MAP.get(raw_state)
+        if state is None:
+            # No (or unknown) state field: fall back to the operation `done` flag.
+            state = BatchState.COMPLETED if data.get("done") else BatchState.IN_PROGRESS
+            if data.get("done") and data.get("error"):
+                state = BatchState.FAILED
         return BatchJobStatus(
             state=state,
-            raw_state="done" if done else "running",
-            output_ref=batch_id if done else None,
+            raw_state=raw_state or ("done" if data.get("done") else "running"),
+            # Results live on the operation itself; re-fetch it to read them.
+            output_ref=batch_id if state is BatchState.COMPLETED else None,
         )
 
     async def fetch_results(self, status: BatchJobStatus) -> AsyncIterator[RawResult]:
@@ -89,9 +110,9 @@ class GeminiBatchBackend:
             operation="batch_results_download",
         )
         data = self._parse(response)
-        inlined = (data.get("response") or {}).get("inlinedResponses") or {}
-        for entry in inlined.get("inlinedResponses") or []:
-            yield _result_entry_to_raw(entry)
+        inlined = (data.get("response") or {}).get("inlinedResponses") or []
+        for index, entry in enumerate(inlined):
+            yield _result_entry_to_raw(entry, index)
 
     async def cancel(self, batch_id: str) -> None:
         url = self._url(f"/v1beta/{batch_id}:cancel")
@@ -126,7 +147,7 @@ class GeminiBatchBackend:
     def _parse(self, response: httpx.Response) -> dict[str, Any]:
         try:
             data = response.json()
-        except json.JSONDecodeError as exc:
+        except ValueError as exc:
             raise ProviderError(
                 f"non-JSON response from batch endpoint: {response.text[:200]!r}",
                 status_code=response.status_code,
@@ -137,8 +158,10 @@ class GeminiBatchBackend:
         return data
 
 
-def _result_entry_to_raw(entry: dict[str, Any]) -> RawResult:
-    custom_id = str((entry.get("metadata") or {}).get("key", ""))
+def _result_entry_to_raw(entry: dict[str, Any], index: int) -> RawResult:
+    # We set metadata.key = custom_id on submit; the API echoes it for correlation.
+    # Fall back to array order (inline responses preserve request order) if absent.
+    custom_id = str((entry.get("metadata") or {}).get("key", "") or index)
     if entry.get("error"):
         return RawResult(
             custom_id=custom_id,

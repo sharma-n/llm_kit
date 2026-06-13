@@ -1,16 +1,18 @@
-"""Anthropic Message Batches backend (inline transport). SCAFFOLDED.
+"""Anthropic Message Batches backend (inline transport).
 
-.. warning::
-   This backend is **not verified against the live Anthropic API**. It exists to
-   prove the ``BatchBackend`` abstraction spans inline transport (no file upload)
-   as well as OpenAI's file-upload transport. The exact request/result field
-   names below follow the documented Message Batches shape but should be
-   confirmed against the live API before relying on them. Tests cover envelope
-   wrap/unwrap against canned mock responses only.
+Implements the documented Anthropic Message Batches API
+(https://platform.claude.com/docs/en/build-with-claude/batch-processing):
 
-Transport (inline): ``POST /v1/messages/batches`` with a ``requests`` array,
-poll ``GET /v1/messages/batches/{id}`` for ``processing_status`` + ``results_url``,
-then stream the jsonl at ``results_url``.
+  - submit:  ``POST /v1/messages/batches`` with ``{"requests": [{custom_id, params}]}``
+  - poll:    ``GET /v1/messages/batches/{id}`` → ``processing_status`` (``in_progress`` /
+             ``canceling`` / ``ended``), ``request_counts``, ``results_url``
+  - results: stream the jsonl at ``results_url``; each line is
+             ``{custom_id, result: {type: succeeded|errored|canceled|expired, message|error}}``
+
+The per-item body (``params``) is the formatter's Messages-API body, and a
+succeeded result's ``message`` is parsed by the same ``parse_response``. Verified
+against the published wire format; exercised in-repo by mock-transport tests only
+(no live-key integration test).
 """
 
 from __future__ import annotations
@@ -40,7 +42,7 @@ _STATE_MAP: dict[str, BatchState] = {
 
 
 class AnthropicBatchBackend:
-    """Inline transport against the Anthropic Message Batches API. SCAFFOLDED."""
+    """Inline transport against the Anthropic Message Batches API."""
 
     def __init__(self, client: httpx.AsyncClient, config: AppConfig, api_key: str | None) -> None:
         self._client = client

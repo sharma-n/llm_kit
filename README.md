@@ -2,7 +2,7 @@
 
 A provider-agnostic, async, high-throughput toolkit for multimodal LLM applications.
 
-Bring your own endpoint — OpenAI, Anthropic, Google Gemini, or anything else that speaks one of their wire formats — your own API key, and a YAML config. `llm_kit` handles rate limiting, image fetching + base64 encoding, retries, structured outputs, and 1M-scale batching.
+Bring your own endpoint — OpenAI, Anthropic, Google Gemini, or anything else that speaks one of their wire formats — your own API key, and a YAML config. `llm_kit` handles rate limiting, image fetching + base64 encoding, retries, structured outputs, 1M-scale concurrent batching, and provider-native 24h batch jobs (≈50% cheaper).
 
 ## Why this exists
 
@@ -116,6 +116,34 @@ Per-item failures become `BatchResult(error=...)` records — they don't crash t
 
 `batch_to_jsonl(..., resume=True)` scans the existing output file for completed item IDs and skips them. There's no separate checkpoint file to keep in sync — the output IS the checkpoint.
 
+### Provider-native batch API (≈50% cheaper, async)
+
+The three sinks above run a *live* concurrent pipeline — your process holds the connections and paces requests through the rate limiter. The **provider batch API** is the opposite trade: hand the whole `list[BatchItem]` to the provider's 24h asynchronous batch endpoint (OpenAI Files + Batches, Anthropic Message Batches, or Google Gemini Batch Mode), poll until it finishes, then download and reconcile. Roughly half the price, at the cost of latency — and the job outlives your process.
+
+Same `BatchItem` in, same `BatchResult` out — only the middle differs (no worker pool, no rate limiter). The backend is selected automatically from `message_format`.
+
+```python
+from llm_kit import BatchJob
+
+# One-shot: submit, poll to completion, write reconciled results to jsonl.
+written = await llm.run_batch_api(items, "out.jsonl", poll_interval=60)
+
+# Or split across processes — the BatchJob handle is the checkpoint:
+job = await llm.submit_batch(items)         # serialize + upload + create
+job.save("job.json")                        # persist the handle (batch_id + manifest)
+
+# ...later, in a fresh process...
+job = BatchJob.load("job.json")
+status = await llm.poll_batch(job)          # BatchJobStatus(state=..., counts=...)
+if status.state.is_terminal:
+    async for result in llm.fetch_batch_results(job, items=items):
+        ...
+```
+
+`response_model` is a Python type, so it isn't persisted in the handle — re-supply `items` at fetch time and per-item schemas validate as usual (metadata is restored from the manifest either way). Results come back as the same `BatchResult` records the live pipeline yields, so the jsonl output and resume-skip behavior are identical. See [examples/provider_batch.py](examples/provider_batch.py).
+
+> All three backends follow their providers' documented Batch wire formats and are covered by mock-transport tests; there are no live-key integration tests in-repo. The OpenAI path is the most exercised.
+
 ## Embeddings
 
 Same async, rate-limited, resumable machinery, pointed at `/v1/embeddings`. The
@@ -183,6 +211,7 @@ The full schema is in [examples/config.yaml](examples/config.yaml). The sections
 | `rate_limit` | `requests_per_minute`, `tokens_per_minute`, `max_concurrent_requests` |
 | `image` | `max_concurrent_downloads`, `cache_size`, `on_failure`, retry policy for image fetches |
 | `batch` | `worker_concurrency`, `input_buffer_size`, `on_failure`, progress logging |
+| `provider_batch` | `completion_window`, `files_path`, `batches_path`, `poll_interval_seconds`, `max_requests_per_batch` (the offline 24h Batch API driver) |
 
 A minimal config (only override what you need):
 
@@ -296,6 +325,7 @@ In a batch, these become `BatchResult.error`. Outside a batch, they're raised fr
 - [examples/single_invoke.py](examples/single_invoke.py) — one chat call
 - [examples/batch_structured.py](examples/batch_structured.py) — small batch with per-item pydantic schemas and image inputs
 - [examples/embed_batch.py](examples/embed_batch.py) — single + micro-batched embeddings
+- [examples/provider_batch.py](examples/provider_batch.py) — provider-native 24h batch API (submit / poll / fetch)
 
 ## Tests
 
@@ -368,12 +398,13 @@ src/llm_kit/
   rate_limit/    # token bucket + composed limiter (sem + RPM + TPM)
   images/        # async fetch + LRU cache + base64 encode
   messages/      # Message dataclass + OpenAI / Anthropic / Gemini wire-format adapters
-  llm/           # BaseLLM + LLMClient + LLMResponse
+  llm/           # BaseLLM + LLMClient + LLMResponse + shared response parsing
   embed/         # OpenAICompatibleEmbedder + micro-batching driver + jsonl
-  batch/         # bounded pipeline + jsonl writer + ID-based resume
+  batch/         # bounded live pipeline + jsonl writer + ID-based resume
+  provider_batch/# offline 24h Batch API driver (OpenAI / Anthropic / Gemini)
   errors.py      # typed exception hierarchy
 examples/        # runnable examples
-tests/           # pytest suite (91 tests)
+tests/           # pytest suite (169 tests)
 benchmarks/      # load tests
 ```
 

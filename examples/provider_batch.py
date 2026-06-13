@@ -16,7 +16,9 @@ The handle (``batch_job.json``) is the checkpoint: it stores the provider batch
 id and a custom_id→metadata manifest so a *fresh* process can reconnect. Note the
 re-supply of ``make_items()`` at fetch time — ``response_model`` is a Python type
 and is not persisted, so validation needs the original items back (matched by id).
-Requires ``message_format: openai`` in config.yaml (the only wired backend).
+The backend is selected by ``message_format`` in config.yaml — ``openai`` (Files +
+Batches), ``anthropic`` (Message Batches), or ``gemini`` (Batch Mode) — all using
+the same commands below.
 """
 
 from __future__ import annotations

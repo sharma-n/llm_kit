@@ -1,8 +1,9 @@
-"""Shape tests for the scaffolded Anthropic + Gemini batch backends.
+"""Shape tests for the Anthropic + Gemini batch backends.
 
 These assert envelope wrap (submit) and unwrap (fetch_results) against canned
-mock responses only. They make NO claim that the backends work against the live
-provider APIs — those are unverified scaffolds (see the module docstrings).
+mock responses shaped to each provider's documented Batch API wire format
+(Anthropic Message Batches; Gemini Batch Mode). They exercise the documented
+shapes via httpx.MockTransport — there is no live-key integration test in-repo.
 """
 
 from __future__ import annotations
@@ -54,6 +55,7 @@ async def test_anthropic_poll_and_fetch_unwrap() -> None:
                 json={
                     "id": "msgbatch-1",
                     "processing_status": "ended",
+                    "request_counts": {"succeeded": 1, "errored": 1, "processing": 0},
                     "results_url": "https://test.invalid/results/msgbatch-1",
                 },
             )
@@ -81,6 +83,7 @@ async def test_anthropic_poll_and_fetch_unwrap() -> None:
     backend = AnthropicBatchBackend(mock_client(handler), _anthropic_config(), "key")
     status = await backend.poll("msgbatch-1")
     assert status.state is BatchState.COMPLETED
+    assert status.counts == {"succeeded": 1, "errored": 1, "processing": 0}
     raws = [r async for r in backend.fetch_results(status)]
     by_id = {r.custom_id: r for r in raws}
     assert by_id["a"].inner_body == {
@@ -116,36 +119,48 @@ async def test_gemini_submit_wraps_requests_with_metadata_key() -> None:
     assert inlined == [{"request": {"contents": []}, "metadata": {"key": "a"}}]
 
 
-async def test_gemini_poll_done_and_fetch_unwrap() -> None:
+async def test_gemini_poll_state_and_fetch_unwrap() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/v1beta/operations/op-1":
+        if request.url.path == "/v1beta/batches/op-1":
             return httpx.Response(
                 200,
                 json={
-                    "name": "operations/op-1",
+                    "name": "batches/op-1",
+                    "metadata": {"state": "JOB_STATE_SUCCEEDED"},
                     "done": True,
+                    # inlinedResponses is a direct array; each element carries
+                    # the echoed metadata.key for correlation, or an error.
                     "response": {
-                        "inlinedResponses": {
-                            "inlinedResponses": [
-                                {
-                                    "metadata": {"key": "a"},
-                                    "response": {
-                                        "candidates": [
-                                            {"content": {"parts": [{"text": "hi"}]}}
-                                        ]
-                                    },
-                                }
-                            ]
-                        }
+                        "inlinedResponses": [
+                            {
+                                "metadata": {"key": "a"},
+                                "response": {
+                                    "candidates": [{"content": {"parts": [{"text": "hi"}]}}]
+                                },
+                            },
+                            {"metadata": {"key": "b"}, "error": {"code": 3, "message": "bad"}},
+                        ]
                     },
                 },
             )
         return httpx.Response(404, json={})
 
     backend = GeminiBatchBackend(mock_client(handler), _gemini_config(), "key")
-    status = await backend.poll("operations/op-1")
+    status = await backend.poll("batches/op-1")
     assert status.state is BatchState.COMPLETED
-    raws = [r async for r in backend.fetch_results(status)]
-    assert len(raws) == 1
-    assert raws[0].custom_id == "a"
-    assert raws[0].inner_body["candidates"][0]["content"]["parts"][0]["text"] == "hi"
+    raws = {r.custom_id: r async for r in backend.fetch_results(status)}
+    assert raws["a"].inner_body["candidates"][0]["content"]["parts"][0]["text"] == "hi"
+    assert raws["b"].error is not None
+
+
+async def test_gemini_poll_running_state_is_in_progress() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"name": "batches/op-2", "metadata": {"state": "JOB_STATE_RUNNING"}},
+        )
+
+    backend = GeminiBatchBackend(mock_client(handler), _gemini_config(), "key")
+    status = await backend.poll("batches/op-2")
+    assert status.state is BatchState.IN_PROGRESS
+    assert status.output_ref is None
