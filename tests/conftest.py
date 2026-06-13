@@ -11,6 +11,7 @@ import pytest
 
 from llm_kit.config.app import AppConfig
 from llm_kit.config.batch import BatchConfig
+from llm_kit.config.embed import EmbeddingConfig
 from llm_kit.config.http import HTTPConfig, RetryConfig
 from llm_kit.config.image import ImageConfig
 from llm_kit.config.llm import LLMConfig
@@ -27,6 +28,12 @@ def make_config(**overrides: Any) -> AppConfig:
         llm=LLMConfig(
             base_url="https://test.invalid",
             model="test-model",
+            api_key="test-key",
+            api_key_env="",
+        ),
+        embed=EmbeddingConfig(
+            base_url="https://test.invalid",
+            model="test-embed-model",
             api_key="test-key",
             api_key_env="",
         ),
@@ -94,6 +101,32 @@ def chat_response(
             "completion_tokens": completion_tokens,
             "total_tokens": prompt_tokens + completion_tokens,
         },
+    }
+
+
+def embedding_response(
+    *,
+    vectors: list[list[float]],
+    model: str = "test-embed-model",
+    prompt_tokens: int = 10,
+    out_of_order: bool = False,
+) -> dict[str, Any]:
+    """Build a minimal OpenAI-shape embeddings response body.
+
+    ``out_of_order`` reverses the ``data`` array (keeping each entry's ``index``)
+    to exercise the client's index-based re-sort.
+    """
+    data = [
+        {"object": "embedding", "index": i, "embedding": vec}
+        for i, vec in enumerate(vectors)
+    ]
+    if out_of_order:
+        data = list(reversed(data))
+    return {
+        "object": "list",
+        "model": model,
+        "data": data,
+        "usage": {"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens},
     }
 
 
@@ -191,6 +224,7 @@ __all__ = [
     "FakeLLM",
     "app_config",
     "chat_response",
+    "embedding_response",
     "fake_llm",
     "make_config",
     "make_items",

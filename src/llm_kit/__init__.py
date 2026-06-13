@@ -1,6 +1,8 @@
 """llm_kit: provider-agnostic async toolkit for multimodal LLM apps."""
 
 from llm_kit.config import AppConfig
+from llm_kit.embed.client import OpenAICompatibleEmbedder
+from llm_kit.embed.response import EmbeddingResponse, EmbeddingResult, EmbedItem
 from llm_kit.errors import (
     AuthError,
     ImageFetchError,
@@ -22,11 +24,15 @@ __all__ = [
     "BaseLLM",
     "BatchItem",
     "BatchResult",
+    "EmbedItem",
+    "EmbeddingResponse",
+    "EmbeddingResult",
     "ImageFetchError",
     "LLMError",
     "LLMResponse",
     "Message",
     "NetworkError",
+    "OpenAICompatibleEmbedder",
     "OpenAICompatibleLLM",
     "ProviderError",
     "RateLimitError",

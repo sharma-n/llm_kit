@@ -12,6 +12,7 @@ from typing import Any, Self, get_args, get_origin, get_type_hints
 import yaml
 
 from llm_kit.config.batch import BatchConfig
+from llm_kit.config.embed import EmbeddingConfig
 from llm_kit.config.http import HTTPConfig
 from llm_kit.config.image import ImageConfig
 from llm_kit.config.llm import LLMConfig
@@ -26,6 +27,7 @@ class AppConfig:
     """Top-level config. Compose from YAML via ``AppConfig.from_yaml(path)``."""
 
     llm: LLMConfig = field(default_factory=LLMConfig)
+    embed: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     http: HTTPConfig = field(default_factory=HTTPConfig)
     rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
     image: ImageConfig = field(default_factory=ImageConfig)

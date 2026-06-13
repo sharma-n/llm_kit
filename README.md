@@ -24,7 +24,7 @@ uv sync               # production deps only
 uv sync --extra dev   # adds pytest + pytest-asyncio
 ```
 
-The package is `llm_kit` (the repo directory happens to be called `harness/`).
+The package is `llm_kit`.
 
 ## Quick start
 
@@ -116,15 +116,69 @@ Per-item failures become `BatchResult(error=...)` records — they don't crash t
 
 `batch_to_jsonl(..., resume=True)` scans the existing output file for completed item IDs and skips them. There's no separate checkpoint file to keep in sync — the output IS the checkpoint.
 
+## Embeddings
+
+Same async, rate-limited, resumable machinery, pointed at `/v1/embeddings`. The
+key difference from chat: the embeddings endpoint takes an **array** of inputs
+per request, so the batch driver **micro-batches** — it packs many inputs into
+each HTTP call (bounded by `max_inputs_per_request` and `max_tokens_per_request`)
+instead of one-request-per-input. Each input still comes back as its own
+`EmbeddingResult`, keyed by `id`.
+
+```python
+import asyncio
+from llm_kit import EmbedItem, OpenAICompatibleEmbedder
+
+async def main():
+    async with OpenAICompatibleEmbedder.from_yaml("examples/config.yaml") as emb:
+        # single string
+        r = await emb.embed_one("The quick brown fox.")
+        print(len(r.vector), r.usage)
+
+        # caller-sized list, one request
+        rs = await emb.embed_texts(["a", "b", "c"])
+
+        # streamed batch — packed into as few requests as the caps allow
+        items = [EmbedItem(id=f"doc-{i}", text=f"document {i}") for i in range(100_000)]
+        async for result in emb.embed_batch(items):
+            if result.ok:
+                use(result.response.vector)
+
+        # resumable jsonl sink (the file IS the checkpoint, same as chat)
+        await emb.embed_batch_to_jsonl(items, "vectors.jsonl", resume=True)
+
+asyncio.run(main())
+```
+
+Rate limiting maps cleanly onto the array shape: **one request = one RPM debit**,
+and the **TPM debit is the sum of the request's inputs**, trued up from the
+response's reported usage. Per-input `usage` is the request total split across
+inputs by estimated size (exact in aggregate). Because failures are per-request,
+an HTTP error fails the whole chunk — every input in it shares the error (or, under
+`batch.on_failure: raise`, aborts the stream).
+
+The `embed` config section mirrors `llm`:
+
+```yaml
+embed:
+  base_url: https://api.openai.com   # or Together / a local server
+  model: text-embedding-3-small
+  api_key_env: OPENAI_API_KEY
+  # dimensions: 512                   # Matryoshka truncation, if the model supports it
+  max_inputs_per_request: 2048
+  max_tokens_per_request: 300000
+```
+
 ## Configuration
 
 Everything is driven by a YAML file loaded into [`AppConfig`](src/llm_kit/config/app.py). Environment-variable interpolation with `${VAR}` and `${VAR:-default}` works inside string values.
 
-The full schema is in [examples/config.yaml](examples/config.yaml). The five sections:
+The full schema is in [examples/config.yaml](examples/config.yaml). The sections:
 
 | Section | Knobs |
 |---|---|
 | `llm` | `base_url`, `model`, `api_key_env`, sampling defaults, `structured_output_style` |
+| `embed` | `base_url`, `model`, `api_key_env`, `dimensions`, `encoding_format`, `max_inputs_per_request`, `max_tokens_per_request` |
 | `http` | connect/read/pool timeouts, pool sizes, HTTP/2, retry policy for the LLM call |
 | `rate_limit` | `requests_per_minute`, `tokens_per_minute`, `max_concurrent_requests` |
 | `image` | `max_concurrent_downloads`, `cache_size`, `on_failure`, retry policy for image fetches |
@@ -215,11 +269,12 @@ In a batch, these become `BatchResult.error`. Outside a batch, they're raised fr
 
 - [examples/single_invoke.py](examples/single_invoke.py) — one chat call
 - [examples/batch_structured.py](examples/batch_structured.py) — small batch with per-item pydantic schemas and image inputs
+- [examples/embed_batch.py](examples/embed_batch.py) — single + micro-batched embeddings
 
 ## Tests
 
 ```bash
-uv run pytest                                       # all 91 tests, ~1.5s
+uv run pytest                                       # all 109 tests, ~1.5s
 uv run pytest tests/test_batch.py                   # one module
 uv run pytest tests/test_batch.py::test_per_item_failure_is_recorded_default
 ```
@@ -254,6 +309,30 @@ Reference result for 10K items at 1000 RPM with a 3s/request simulated LLM laten
 
 The first two are statistically identical — at sensible defaults, image traffic doesn't move the LLM RPM. The third shows what happens when the fetcher becomes the bottleneck: items queue upstream of the rate limiter, and effective RPM drops below the configured cap.
 
+### Embeddings throughput
+
+[benchmarks/embed_throughput.py](benchmarks/embed_throughput.py) demonstrates the embeddings analogue: throughput is governed by how many inputs the packer puts in each request, not by RPM alone.
+
+```bash
+# Packed (default): a few fat requests, RPM never binds
+uv run python benchmarks/embed_throughput.py
+
+# The pathological un-packed case: one request per input → RPM-bound
+uv run python benchmarks/embed_throughput.py --items 3500 --max-inputs 1 --rpm 2000 --latency 0.01
+
+# Force the token cap (not the count cap) to bind the chunk size
+uv run python benchmarks/embed_throughput.py --max-tokens 2000
+```
+
+Reference result for 20K inputs (~60 tokens each), 20ms/request latency:
+
+| Scenario | inputs/request | inputs/sec | requests |
+|---|---:|---:|---:|
+| Packed (`max_inputs_per_request` 2048) | 2048 | 9107 | 10 |
+| Un-packed (`max_inputs_per_request` 1)* | 1 | 78 | 3500 |
+
+\* *un-packed row run at 3500 inputs / RPM 2000 / 10ms latency so it finishes; it's RPM-bound, the packed row is not.* The ~100× gap is the entire point of invariant #9 — `max_inputs_per_request` is the dominant throughput lever for embeddings.
+
 ## Project layout
 
 ```
@@ -264,6 +343,7 @@ src/llm_kit/
   images/        # async fetch + LRU cache + base64 encode
   messages/      # Message dataclass + OpenAI wire-format adapter
   llm/           # BaseLLM + OpenAICompatibleLLM + LLMResponse
+  embed/         # OpenAICompatibleEmbedder + micro-batching driver + jsonl
   batch/         # bounded pipeline + jsonl writer + ID-based resume
   errors.py      # typed exception hierarchy
 examples/        # runnable examples

@@ -12,6 +12,19 @@ llm:
   structured_output_style: openai_json_schema
   extra_headers: {}
 
+embed:
+  base_url: ${EMBED_BASE_URL:-https://api.openai.com}
+  embeddings_path: /v1/embeddings
+  model: ${EMBED_MODEL:-text-embedding-3-small}
+  api_key_env: OPENAI_API_KEY
+  encoding_format: float
+  # dimensions: 512            # uncomment for Matryoshka truncation
+  extra_headers: {}
+  # Micro-batch caps: a request flushes when adding the next input would breach
+  # either. Defaults track OpenAI's per-request limits.
+  max_inputs_per_request: 2048
+  max_tokens_per_request: 300000
+
 http:
   connect_timeout_seconds: 10.0
   read_timeout_seconds: 120.0

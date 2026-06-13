@@ -2,9 +2,9 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project name gotcha
+## Project name
 
-The directory is `harness/` but the installed package is **`llm_kit`** (under `src/llm_kit/`). Always `import llm_kit`, never `import harness`.
+The directory is `llm_kit/` and the installed package is **`llm_kit`** (under `src/llm_kit/`). Always `import llm_kit`.
 
 ## Tooling
 
@@ -17,15 +17,18 @@ The directory is `harness/` but the installed package is **`llm_kit`** (under `s
   - One file: `uv run pytest tests/test_batch.py`
   - One test: `uv run pytest tests/test_batch.py::test_per_item_failure_is_recorded_default`
   - `asyncio_mode = "auto"` is preconfigured in `pyproject.toml`, so async tests don't need a decorator.
-- Test fixtures + helpers live in [tests/conftest.py](tests/conftest.py): `make_config` (deterministic AppConfig with retries/jitter dialed down), `mock_client` (httpx.MockTransport wrapper), `chat_response` / `tool_use_response` (OpenAI-shaped response bodies), and `FakeLLM` (drop-in BaseLLM for batch-driver tests, no HTTP). Test files import these via `from conftest import ...` (not `tests.conftest`).
+- Test fixtures + helpers live in [tests/conftest.py](tests/conftest.py): `make_config` (deterministic AppConfig with retries/jitter dialed down — includes an `embed` section), `mock_client` (httpx.MockTransport wrapper), `chat_response` / `tool_use_response` / `embedding_response` (OpenAI-shaped response bodies), and `FakeLLM` (drop-in BaseLLM for batch-driver tests, no HTTP). Embed-driver tests use a local `FakeEmbedder` in [tests/test_embed_driver.py](tests/test_embed_driver.py) implementing the `embed_request` contract. Test files import these via `from conftest import ...` (not `tests.conftest`).
 
 ## Architecture — the load-bearing invariants
 
 The package is six layers, strictly bottom-up. Each layer depends only on layers below it.
 
 ```
-config  →  http  →  rate_limit / images / messages  →  llm  →  batch
+config  →  http  →  rate_limit / images / messages  →  llm   →  batch
+                                                     →  embed →  (embed/driver)
 ```
+
+`embed/` is a peer of `llm/` — same layer, same dependencies (config, http, rate_limit), no dependency on `images/` or `messages/` (embeddings are text-in, vector-out). It does **not** reuse `batch/processor.py`; see invariant #9.
 
 A few invariants that span files and are easy to break without realizing:
 
@@ -44,6 +47,8 @@ A few invariants that span files and are easy to break without realizing:
 7. **Per-item failures never crash the pipeline by default.** The batch processor catches `LLMError` (and unexpected exceptions) per item and emits `BatchResult(error=...)`. The only way a batch aborts mid-stream is `BatchConfig.on_failure = raise`.
 
 8. **The image fetcher runs upstream of the rate limiter.** `OpenAICompatibleLLM.invoke` does `fetch_images → acquire(RPM bucket) → POST`. This means *fetcher throughput is the effective ceiling on LLM RPM* — if the fetcher's semaphore is saturated, items queue before they ever reach the limiter, and the configured RPM cap becomes unreachable. Concretely: `max_concurrent_downloads ≥ ceil(RPM/60 × avg_images_per_item × avg_fetch_latency_sec)`. The benchmark in [benchmarks/rpm_throughput.py](benchmarks/rpm_throughput.py) demonstrates this — dropping fetcher slots from 64 to 4 (well below the workload's need) cuts steady-state RPM from 1001 to 863 even though the LLM limiter would happily allow more.
+
+9. **Embeddings are chunk-as-unit, not item-as-unit.** The `/v1/embeddings` endpoint takes an *array* of inputs per request, so [`embed/driver.py`](src/llm_kit/embed/driver.py) has a **packer** stage that accumulates inputs into request-sized chunks (bounded by `EmbeddingConfig.max_inputs_per_request` *and* `max_tokens_per_request`) before any POST. This is why it doesn't reuse `batch/processor.py` (whose unit is one-item-one-request). The rate-limit mapping follows from this: **one chunk = one RPM debit**, and the **TPM debit is the sum of the chunk's inputs**, trued up from the response's reported usage. Do not "simplify" this back to one-request-per-input — that throws away the dominant throughput lever for embeddings. Consequence to keep in mind: failures are coarser-grained — one failed request fails its whole chunk, so every input in it gets the same `EmbeddingResult.error` (per-input `usage` is the request total split by `split_usage`, exact in aggregate).
 
 ## The batch pipeline
 
@@ -68,7 +73,7 @@ The YAML loader walks dataclass fields via `get_type_hints` and recursively cons
 
 ## Public surface
 
-`from llm_kit import ...` exposes `AppConfig`, `BaseLLM`, `OpenAICompatibleLLM`, `Message`, `BatchItem`, `BatchResult`, `LLMResponse`, and the full error hierarchy. Treat anything outside that list as internal — feel free to refactor freely.
+`from llm_kit import ...` exposes `AppConfig`, `BaseLLM`, `OpenAICompatibleLLM`, `OpenAICompatibleEmbedder`, `Message`, `BatchItem`, `BatchResult`, `LLMResponse`, `EmbedItem`, `EmbeddingResponse`, `EmbeddingResult`, and the full error hierarchy. Treat anything outside that list as internal — feel free to refactor freely.
 
 ## Benchmarks
 
@@ -81,3 +86,5 @@ Flags worth knowing:
 - `--max-image-downloads 4` — drops `ImageConfig.max_concurrent_downloads` to force fetcher saturation
 
 The output reports overall RPM, sliding-60s window stats, and inter-arrival percentiles. Use the sliding-60s **median** (not the overall RPM) to read steady-state behavior — the token bucket starts full, so the first minute always bursts above the cap by design.
+
+[benchmarks/embed_throughput.py](benchmarks/embed_throughput.py) is the embeddings counterpart — a real `OpenAICompatibleEmbedder` against a latency-sleeping mock embeddings handler. Use it to validate changes to `embed/` (the packer especially) or the embeddings request path. It measures **inputs/sec** (the headline) and the realized inputs-per-request distribution, so it directly exercises invariant #9. The key lever is `--max-inputs` (`EmbeddingConfig.max_inputs_per_request`): the default 2048 packs into a handful of requests; `--max-inputs 1` is the un-packed pathological case where RPM binds and inputs/sec collapses ~100×. Same bucket-burst caveat applies — short runs report `overall_rpm` above the cap, so read steady state from the inter-arrival percentiles or a >60s run's window samples.
