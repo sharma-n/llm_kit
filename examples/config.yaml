@@ -1,0 +1,56 @@
+# Example llm_kit configuration.
+# ${VAR} interpolation pulls from the environment at load time.
+# ${VAR:-default} supplies a fallback.
+
+llm:
+  base_url: ${LLM_BASE_URL:-https://api.openai.com}
+  chat_completions_path: /v1/chat/completions
+  model: ${LLM_MODEL:-gpt-4o-mini}
+  api_key_env: OPENAI_API_KEY
+  temperature: 0.2
+  max_tokens: 1024
+  structured_output_style: openai_json_schema
+  extra_headers: {}
+
+http:
+  connect_timeout_seconds: 10.0
+  read_timeout_seconds: 120.0
+  write_timeout_seconds: 30.0
+  pool_timeout_seconds: 10.0
+  max_connections: 256
+  max_keepalive_connections: 64
+  keepalive_expiry_seconds: 30.0
+  http2: true
+  llm_retry:
+    max_retries: 5
+    backoff_base_seconds: 0.5
+    backoff_max_seconds: 30.0
+    jitter_seconds: 0.25
+    retry_on_status: [408, 409, 425, 429, 500, 502, 503, 504]
+
+rate_limit:
+  max_concurrent_requests: 64
+  requests_per_minute: 3000
+  tokens_per_minute: 1500000
+  default_chars_per_token: 4.0
+
+image:
+  max_concurrent_downloads: 32
+  fetch_timeout_seconds: 30.0
+  max_bytes: 20971520  # 20 MiB
+  default_mime_type: image/png
+  cache_size: 4096
+  threadpool_encode_threshold_bytes: 1048576  # 1 MiB
+  on_failure: raise
+  retry:
+    max_retries: 3
+    backoff_base_seconds: 0.25
+    backoff_max_seconds: 10.0
+    jitter_seconds: 0.1
+    retry_on_status: [408, 429, 500, 502, 503, 504]
+
+batch:
+  worker_concurrency: 128
+  input_buffer_size: 512
+  on_failure: record
+  progress_log_every: 100
