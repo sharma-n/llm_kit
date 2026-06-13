@@ -54,6 +54,21 @@ that test, not by raw capability gap.
   in config. For streaming (`batch_stream`) loops, `UsageLedger` is also exported
   directly for manual accumulation.
 
+- **Streaming single calls + tool-call *parsing* (the agent-fork enablers).**
+  `LLMClient.invoke_stream` streams one call as a typed event sequence
+  (`TextChunk` → optional `ToolCallStarted` → terminal `StreamEnd` with the
+  assembled `LLMResponse`); `invoke` and `invoke_stream` both accept
+  `tools`/`tool_choice` and surface provider-agnostic `ToolCall`s. The hard,
+  provider-specific parts — SSE decoding and reassembling streamed tool-call
+  fragments — live in the formatter (`stream_events`, `extract_tool_calls`);
+  `StreamAssembler` (`llm/streaming.py`) is the provider-agnostic streaming analog
+  of `parse_response`. Scoped per the identity-fork rule below: **`llm_kit` parses
+  tool calls; it does not execute them**, and streaming is **single-call only,
+  never the batch path** (`retry_stream` retries only stream establishment).
+  Implemented for the OpenAI formatter; Anthropic/Gemini are a fast-follow
+  (they raise `NotImplementedError` on `tools`/`stream` today). This is the
+  deliberate fork toward the `agent_kit` sibling project (see SPEC.md).
+
 - **Provider formatters — Anthropic + Gemini.** `AnthropicFormatter` and
   `GeminiFormatter` in [`messages/formatter.py`](src/llm_kit/messages/formatter.py),
   selected via `LLMConfig.message_format` (`openai` / `anthropic` / `gemini`). Each
@@ -93,9 +108,12 @@ it on purpose, not as "next on the list."
   item becomes a *multi-step* unit, so the O(buffer) memory and per-item-failure
   isolation invariants need a deliberate extension, not a bolt-on. This is also
   precisely the LangChain/LangGraph surface area, where the work is already
-  commoditized. Note `tool_use` currently exists only as a *structured-output
-  style*, not an execution loop. If pursued, treat it as a sibling project built
-  *on* the engine, not folded into the batch path.
+  commoditized. **Update:** the *parsing* half is now shipped (see Done — tool
+  defs in, provider-agnostic `ToolCall`s out, for both `invoke` and
+  `invoke_stream`); what stays forked is everything *stateful* — the execution
+  loop, tool result feedback, timeouts, and bounded multi-step orchestration.
+  That lives in the `agent_kit` sibling project (SPEC.md), built *on* the engine,
+  never folded into the batch path.
 - **RAG (storage + retrieval).** "The interface is the product" is the LangChain
   thesis verbatim, and shipping vector-store adapters puts you in the
   integration-maintenance business that is LangChain's whole burden. If pursued:
@@ -108,9 +126,8 @@ it on purpose, not as "next on the list."
     Protocol, *never* core deps.
   - **`Retriever`** — query-embed + store-search, returns context for the chat
     client.
-- **Streaming `invoke()`.** Token streaming for interactive/single-call use.
-  Genuinely useful but most at odds with the batch design — if done, scope it
-  strictly to single calls, never the batch path.
+- **Streaming `invoke()`.** ✅ Shipped as `invoke_stream` (see Done), scoped
+  strictly to single calls, never the batch path — exactly as this item required.
 
 ---
 

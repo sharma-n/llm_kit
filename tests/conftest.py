@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import json
+from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 from typing import Any
 
@@ -157,6 +158,102 @@ def tool_use_response(*, arguments_json: str) -> dict[str, Any]:
     }
 
 
+def tool_call_response(
+    *,
+    tool_calls: list[dict[str, Any]],
+    content: str | None = None,
+    finish_reason: str = "tool_calls",
+    prompt_tokens: int = 5,
+    completion_tokens: int = 4,
+) -> dict[str, Any]:
+    """OpenAI-shape chat response carrying one or more ``tool_calls``.
+
+    Each entry in ``tool_calls`` is ``{"id", "name", "arguments"}`` where
+    ``arguments`` is the JSON *string* the provider would send.
+    """
+    return {
+        "id": "chatcmpl-test",
+        "model": "test-model",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": [
+                        {
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tc["name"],
+                                "arguments": tc["arguments"],
+                            },
+                        }
+                        for tc in tool_calls
+                    ],
+                },
+                "finish_reason": finish_reason,
+            }
+        ],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        },
+    }
+
+
+def sse_bytes(chunks: list[dict[str, Any]], *, done: bool = True) -> bytes:
+    """Serialize chunk dicts as an OpenAI-style ``text/event-stream`` body."""
+    parts = [f"data: {json.dumps(c)}\n\n" for c in chunks]
+    if done:
+        parts.append("data: [DONE]\n\n")
+    return "".join(parts).encode()
+
+
+def openai_text_stream(
+    text_pieces: list[str],
+    *,
+    model: str = "test-model",
+    finish_reason: str = "stop",
+    prompt_tokens: int = 7,
+    completion_tokens: int = 3,
+) -> bytes:
+    """A simple text-only OpenAI stream: deltas, a finish chunk, a usage chunk."""
+    chunks: list[dict[str, Any]] = [
+        {"model": model, "choices": [{"index": 0, "delta": {"content": piece}}]}
+        for piece in text_pieces
+    ]
+    chunks.append(
+        {"model": model, "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}]}
+    )
+    chunks.append(
+        {
+            "model": model,
+            "choices": [],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            },
+        }
+    )
+    return sse_bytes(chunks)
+
+
+def stream_mock_client(body: bytes, *, status: int = 200) -> httpx.AsyncClient:
+    """An AsyncClient whose every request returns ``body`` as a stream."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status,
+            content=body,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    return mock_client(handler)
+
+
 class FakeLLM(BaseLLM):
     """Drop-in BaseLLM for batch-driver tests. No HTTP, no httpx, deterministic."""
 
@@ -167,12 +264,15 @@ class FakeLLM(BaseLLM):
         fail_ids: set[str] | None = None,
         delay_seconds: float = 0.0,
         responder: Callable[[list[Message]], str] | None = None,
+        stream_script: list[Any] | None = None,
     ) -> None:
         self._config = config or make_config()
         self._fail_ids = fail_ids or set()
         self._delay = delay_seconds
         self._responder = responder or (lambda msgs: f"echo: {msgs[-1].text or ''}")
+        self._stream_script = stream_script
         self.invoke_calls: list[list[Message]] = []
+        self.stream_calls: list[list[Message]] = []
         self.fail_now: set[str] = set(self._fail_ids)
 
     async def invoke(
@@ -197,6 +297,39 @@ class FakeLLM(BaseLLM):
         return LLMResponse(
             text=self._responder(messages),
             usage=TokenUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    async def invoke_stream(
+        self,
+        messages: list[Message],
+        *,
+        response_model: type | None = None,
+        overrides: dict[str, Any] | None = None,
+        tools: Any = None,
+        tool_choice: Any = None,
+    ) -> AsyncIterator[Any]:
+        """Scripted stream for agent-style tests.
+
+        If ``stream_script`` was supplied, yields those events verbatim.
+        Otherwise yields one ``TextChunk`` per word of the responder text and a
+        terminal ``StreamEnd`` built from the assembled text.
+        """
+        from llm_kit.llm.streaming import StreamEnd, TextChunk
+        from llm_kit.llm.response import LLMResponse, TokenUsage
+
+        self.stream_calls.append(messages)
+        if self._stream_script is not None:
+            for event in self._stream_script:
+                yield event
+            return
+        text = self._responder(messages)
+        for word in text.split():
+            yield TextChunk(text=word + " ")
+        yield StreamEnd(
+            LLMResponse(
+                text=text,
+                usage=TokenUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
         )
 
     def batch_stream(self, items, *, completed_ids=None):
@@ -231,5 +364,9 @@ __all__ = [
     "make_config",
     "make_items",
     "mock_client",
+    "openai_text_stream",
+    "sse_bytes",
+    "stream_mock_client",
+    "tool_call_response",
     "tool_use_response",
 ]

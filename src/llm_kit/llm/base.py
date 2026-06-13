@@ -39,6 +39,24 @@ class BaseLLM(ABC):
         Raises ``LLMError`` on terminal failure after retries.
         """
 
+    def invoke_stream(
+        self,
+        messages: list[Message],
+        *,
+        response_model: type[BaseModel] | None = None,
+        overrides: dict[str, Any] | None = None,
+        tools: Any = None,
+        tool_choice: Any = None,
+    ) -> AsyncIterator[Any]:
+        """Stream a single chat completion as typed stream events.
+
+        Optional: the throughput-oriented batch path never streams, so simple
+        ``BaseLLM`` stubs need not implement this. ``LLMClient`` overrides it.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement invoke_stream"
+        )
+
     @abstractmethod
     def batch_stream(
         self,

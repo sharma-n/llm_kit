@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from pydantic import ValidationError as PydanticValidationError
 
 from llm_kit.errors import ValidationError
-from llm_kit.llm.response import LLMResponse, TokenUsage
+from llm_kit.llm.response import LLMResponse, TokenUsage, ToolCall
 
 
 class ResponseParser(Protocol):
@@ -28,6 +28,7 @@ class ResponseParser(Protocol):
     def extract_text(self, data: dict[str, Any]) -> str: ...
     def extract_usage(self, data: dict[str, Any]) -> tuple[int, int, int]: ...
     def finish_reason(self, data: dict[str, Any]) -> str | None: ...
+    def extract_tool_calls(self, data: dict[str, Any]) -> list[ToolCall]: ...
 
 
 def parse_response(
@@ -43,7 +44,7 @@ def parse_response(
     text does not satisfy it.
     """
     text = formatter.extract_text(data)
-    parsed = _validate(text, response_model)
+    parsed = validate_text(text, response_model)
     prompt, completion, total = formatter.extract_usage(data)
     return LLMResponse(
         text=text,
@@ -53,12 +54,18 @@ def parse_response(
         ),
         model=data.get("model"),
         finish_reason=formatter.finish_reason(data),
+        tool_calls=formatter.extract_tool_calls(data),
         raw=data,
         latency_seconds=latency_seconds,
     )
 
 
-def _validate(text: str, response_model: type[BaseModel] | None) -> BaseModel | None:
+def validate_text(text: str, response_model: type[BaseModel] | None) -> BaseModel | None:
+    """Validate ``text`` against ``response_model``; ``None`` if no model.
+
+    Shared by the non-streaming ``parse_response`` and the streaming assembler so
+    a schema mismatch always becomes the same typed ``ValidationError``.
+    """
     if response_model is None:
         return None
     try:

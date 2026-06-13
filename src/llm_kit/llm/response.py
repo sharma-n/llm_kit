@@ -8,7 +8,18 @@ from typing import Any
 from pydantic import BaseModel
 
 from llm_kit.errors import LLMError
+from llm_kit.messages.tools import ToolCall, ToolDefinition
 from llm_kit.messages.types import Message
+
+__all__ = [
+    "BatchItem",
+    "BatchResult",
+    "BatchSummary",
+    "LLMResponse",
+    "TokenUsage",
+    "ToolCall",
+    "ToolDefinition",
+]
 
 
 @dataclass(slots=True)
@@ -27,6 +38,7 @@ class LLMResponse:
     usage: TokenUsage = field(default_factory=TokenUsage)
     model: str | None = None
     finish_reason: str | None = None
+    tool_calls: list[ToolCall] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
     latency_seconds: float = 0.0
 

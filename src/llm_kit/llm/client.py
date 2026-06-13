@@ -23,13 +23,15 @@ from llm_kit.batch.processor import run_batch_stream
 from llm_kit.config.app import AppConfig
 from llm_kit.config.llm import MessageFormat
 from llm_kit.errors import AuthError, LLMError, ProviderError
-from llm_kit.http.retry import retry_request
+from llm_kit.http.retry import retry_request, retry_stream
 from llm_kit.http.session import build_async_client
 from llm_kit.images.fetcher import ImageFetcher
 from llm_kit.llm.base import BaseLLM
 from llm_kit.llm.parsing import parse_response
 from llm_kit.llm.response import BatchItem, BatchResult, BatchSummary, LLMResponse
+from llm_kit.llm.streaming import StreamAssembler, StreamEnd, StreamEvent
 from llm_kit.messages.formatter import AnthropicFormatter, GeminiFormatter, OpenAIFormatter
+from llm_kit.messages.tools import ToolDefinition
 from llm_kit.messages.types import Message
 from llm_kit.provider_batch.driver import build_backend, reconcile, serialize_items
 from llm_kit.provider_batch.job import BatchJob
@@ -92,8 +94,12 @@ class LLMClient(BaseLLM):
         *,
         response_model: type[BaseModel] | None = None,
         overrides: dict[str, Any] | None = None,
+        tools: list[ToolDefinition] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
-        body = await self._build_request_body(messages, response_model, overrides)
+        body = await self._build_request_body(
+            messages, response_model, overrides, tools=tools, tool_choice=tool_choice
+        )
 
         estimated = self._limiter.estimate_tokens(messages)
         started = time.perf_counter()
@@ -118,6 +124,56 @@ class LLMClient(BaseLLM):
             estimated=estimated, actual=result.usage.total_tokens
         )
         return result
+
+    async def invoke_stream(
+        self,
+        messages: list[Message],
+        *,
+        response_model: type[BaseModel] | None = None,
+        overrides: dict[str, Any] | None = None,
+        tools: list[ToolDefinition] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Stream a single chat completion as a typed ``AgentEvent`` sequence.
+
+        Yields ``TextChunk`` deltas live (for time-to-first-token) and
+        ``ToolCallStarted`` hints, then a terminal ``StreamEnd`` carrying the
+        fully-assembled ``LLMResponse`` (text, parsed tool calls, usage,
+        finish reason). Single-call only — never the batch path (see ROADMAP).
+
+        Retries cover establishing the stream; a mid-stream failure propagates.
+        """
+        body = await self._build_request_body(
+            messages, response_model, overrides, tools=tools, tool_choice=tool_choice, stream=True
+        )
+
+        estimated = self._limiter.estimate_tokens(messages)
+        started = time.perf_counter()
+        assembler = StreamAssembler()
+
+        async with self._limiter.acquire(estimated_tokens=estimated):
+            async with retry_stream(
+                lambda: self._client.stream(
+                    "POST",
+                    self._endpoint(),
+                    headers=self._headers(),
+                    json=body,
+                ),
+                retry=self._config.http.llm_retry,
+                operation="chat_completion_stream",
+            ) as response:
+                async for fragment in self._formatter.stream_events(
+                    response.aiter_lines()
+                ):
+                    for event in assembler.ingest(fragment):
+                        yield event
+
+        elapsed = time.perf_counter() - started
+        end = assembler.finish(response_model=response_model, latency_seconds=elapsed)
+        self._limiter.true_up_tokens(
+            estimated=estimated, actual=end.response.usage.total_tokens
+        )
+        yield end
 
     def batch_stream(
         self,
@@ -265,16 +321,30 @@ class LLMClient(BaseLLM):
         messages: list[Message],
         response_model: type[BaseModel] | None,
         overrides: dict[str, Any] | None,
+        *,
+        tools: list[ToolDefinition] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        stream: bool = False,
     ) -> dict[str, Any]:
         """Fetch+inline images and assemble the provider request body.
 
         Shared by the live ``invoke`` path and the provider-batch serializer so
-        both produce byte-identical request bodies for the same item.
+        both produce byte-identical request bodies for the same item. ``tools`` /
+        ``tool_choice`` / ``stream`` default to off, so the batch serializer
+        (which omits them) is unaffected.
         """
         encoded = await self._images.fetch_many(
             [u for m in messages for u in m.image_urls]
         )
-        return self._build_body(messages, encoded, response_model, overrides)
+        return self._build_body(
+            messages,
+            encoded,
+            response_model,
+            overrides,
+            tools=tools,
+            tool_choice=tool_choice,
+            stream=stream,
+        )
 
     def _build_body(
         self,
@@ -282,6 +352,10 @@ class LLMClient(BaseLLM):
         encoded_images: dict[str, str],
         response_model: type[BaseModel] | None,
         overrides: dict[str, Any] | None,
+        *,
+        tools: list[ToolDefinition] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        stream: bool = False,
     ) -> dict[str, Any]:
         cfg = self._config.llm
         body = self._formatter.build_body(
@@ -293,6 +367,9 @@ class LLMClient(BaseLLM):
             max_tokens=cfg.max_tokens,
             extra_sampling=cfg.extra_sampling,
             response_model=response_model,
+            tools=tools,
+            tool_choice=tool_choice,
+            stream=stream,
         )
         if overrides:
             body.update(overrides)
