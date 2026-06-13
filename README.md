@@ -2,7 +2,7 @@
 
 A provider-agnostic, async, high-throughput toolkit for multimodal LLM applications.
 
-Bring your own endpoint (anything that speaks OpenAI's `/v1/chat/completions` shape), your own API key, and a YAML config — `llm_kit` handles the rate limiting, image fetching + base64 encoding, retries, structured outputs, and 1M-scale batching.
+Bring your own endpoint — OpenAI, Anthropic, Google Gemini, or anything else that speaks one of their wire formats — your own API key, and a YAML config. `llm_kit` handles rate limiting, image fetching + base64 encoding, retries, structured outputs, and 1M-scale batching.
 
 ## Why this exists
 
@@ -64,7 +64,7 @@ response = await llm.invoke([
 
 ### Structured outputs (one model does double duty)
 
-Pass a pydantic model — it's both injected as `response_format` in the request AND used to validate the response. The validated object lands at `response.parsed`.
+Pass a pydantic model — it's both injected as the provider's native structured-output schema in the request AND used to validate the response. The validated object lands at `response.parsed`.
 
 ```python
 from pydantic import BaseModel
@@ -177,7 +177,7 @@ The full schema is in [examples/config.yaml](examples/config.yaml). The sections
 
 | Section | Knobs |
 |---|---|
-| `llm` | `base_url`, `model`, `api_key_env`, sampling defaults, `structured_output_style` |
+| `llm` | `base_url`, `model`, `api_key_env`, sampling defaults, `message_format`, `structured_output_style` |
 | `embed` | `base_url`, `model`, `api_key_env`, `dimensions`, `encoding_format`, `max_inputs_per_request`, `max_tokens_per_request` |
 | `http` | connect/read/pool timeouts, pool sizes, HTTP/2, retry policy for the LLM call |
 | `rate_limit` | `requests_per_minute`, `tokens_per_minute`, `max_concurrent_requests` |
@@ -201,17 +201,43 @@ All other fields take their dataclass defaults.
 
 ### Provider portability
 
-For an OpenAI-compatible non-OpenAI endpoint:
+`message_format` selects the wire format. Three values are supported:
+
+**OpenAI and OpenAI-compatible endpoints** (vLLM, Ollama, Together, …) — the default:
 
 ```yaml
 llm:
   base_url: https://api.together.xyz       # or http://localhost:11434 for Ollama
   model: meta-llama/Llama-3.3-70B-Instruct
   api_key_env: TOGETHER_API_KEY
+  message_format: openai
   structured_output_style: openai_json_schema  # or tool_use, or none
 ```
 
-`structured_output_style` is the per-provider switch for how `response_format` is wired. Anthropic-style providers may want `tool_use`; pure local servers without structured-output support take `none`.
+`structured_output_style` fine-tunes how structured outputs are expressed for OpenAI-compatible endpoints; it has no effect on Anthropic or Gemini.
+
+**Anthropic:**
+
+```yaml
+llm:
+  base_url: https://api.anthropic.com
+  chat_completions_path: /v1/messages
+  model: claude-opus-4-8
+  api_key_env: ANTHROPIC_API_KEY
+  message_format: anthropic
+```
+
+**Google Gemini:**
+
+```yaml
+llm:
+  base_url: https://generativelanguage.googleapis.com
+  chat_completions_path: /v1beta/models/gemini-2.0-flash:generateContent
+  api_key_env: GEMINI_API_KEY
+  message_format: gemini
+```
+
+For Gemini the model name lives in `chat_completions_path` (not in `model`), because Gemini embeds it in the URL.
 
 ## Rate limiting
 
@@ -274,7 +300,7 @@ In a batch, these become `BatchResult.error`. Outside a batch, they're raised fr
 ## Tests
 
 ```bash
-uv run pytest                                       # all 109 tests, ~1.5s
+uv run pytest                                       # all tests, ~1.5s
 uv run pytest tests/test_batch.py                   # one module
 uv run pytest tests/test_batch.py::test_per_item_failure_is_recorded_default
 ```
@@ -341,7 +367,7 @@ src/llm_kit/
   http/          # shared httpx.AsyncClient + retry wrapper
   rate_limit/    # token bucket + composed limiter (sem + RPM + TPM)
   images/        # async fetch + LRU cache + base64 encode
-  messages/      # Message dataclass + OpenAI wire-format adapter
+  messages/      # Message dataclass + OpenAI / Anthropic / Gemini wire-format adapters
   llm/           # BaseLLM + LLMClient + LLMResponse
   embed/         # OpenAICompatibleEmbedder + micro-batching driver + jsonl
   batch/         # bounded pipeline + jsonl writer + ID-based resume

@@ -1,11 +1,11 @@
-"""Tests for OpenAIFormatter and AnthropicFormatter."""
+"""Tests for OpenAIFormatter, AnthropicFormatter, and GeminiFormatter."""
 
 from __future__ import annotations
 
 from pydantic import BaseModel
 
 from llm_kit.config.llm import StructuredOutputStyle
-from llm_kit.messages.formatter import AnthropicFormatter, OpenAIFormatter
+from llm_kit.messages.formatter import AnthropicFormatter, GeminiFormatter, OpenAIFormatter
 from llm_kit.messages.types import Message
 
 
@@ -15,6 +15,10 @@ def _fmt(style: StructuredOutputStyle = StructuredOutputStyle.OPENAI_JSON_SCHEMA
 
 def _afmt() -> AnthropicFormatter:
     return AnthropicFormatter()
+
+
+def _gfmt() -> GeminiFormatter:
+    return GeminiFormatter()
 
 
 class _Foo(BaseModel):
@@ -234,3 +238,152 @@ def test_anthropic_finish_reason() -> None:
 
 def test_anthropic_finish_reason_missing_returns_none() -> None:
     assert _afmt().finish_reason({}) is None
+
+
+# ============================================================ GeminiFormatter — request
+
+
+def test_gemini_system_excluded_from_contents() -> None:
+    msgs = [Message.system("be helpful"), Message.user("hi")]
+    out = _gfmt().format_messages(msgs, {})
+    assert len(out) == 1
+    assert out[0]["role"] == "user"
+
+
+def test_gemini_assistant_role_mapped_to_model() -> None:
+    msgs = [Message.assistant("hello")]
+    out = _gfmt().format_messages(msgs, {})
+    assert out[0]["role"] == "model"
+
+
+def test_gemini_system_prompt_extracted() -> None:
+    msgs = [Message.system("be helpful"), Message.user("hi")]
+    assert _gfmt().system_prompt(msgs) == "be helpful"
+
+
+def test_gemini_system_prompt_returns_none_when_absent() -> None:
+    assert _gfmt().system_prompt([Message.user("hi")]) is None
+
+
+def test_gemini_text_message_uses_parts() -> None:
+    out = _gfmt().format_messages([Message.user("hello")], {})
+    assert out == [{"role": "user", "parts": [{"text": "hello"}]}]
+
+
+def test_gemini_image_format_uses_inline_data() -> None:
+    msgs = [Message.user("look:", image_urls=["http://x/a.png"])]
+    out = _gfmt().format_messages(msgs, {"http://x/a.png": "data:image/png;base64,AAA="})
+    parts = out[0]["parts"]
+    assert parts[0] == {"text": "look:"}
+    assert parts[1] == {"inlineData": {"mimeType": "image/png", "data": "AAA="}}
+
+
+def test_gemini_empty_message_gets_placeholder_part() -> None:
+    out = _gfmt().format_messages([Message.user(None)], {})
+    assert out[0]["parts"] == [{"text": ""}]
+
+
+def test_gemini_structured_output_fields() -> None:
+    fields = _gfmt().structured_output_fields(_Foo)
+    assert fields["responseMimeType"] == "application/json"
+    assert "properties" in fields["responseSchema"]
+    assert "output_config" not in fields
+
+
+def test_gemini_structured_output_no_model_returns_empty_dict() -> None:
+    assert _gfmt().structured_output_fields(None) == {}
+
+
+def test_gemini_default_headers_include_api_key() -> None:
+    headers = _gfmt().default_headers("my-key")
+    assert headers == {"x-goog-api-key": "my-key"}
+    assert "authorization" not in headers
+
+
+def test_gemini_default_headers_no_key_returns_empty() -> None:
+    assert _gfmt().default_headers(None) == {}
+
+
+def test_gemini_build_body_structure() -> None:
+    msgs = [Message.system("sys"), Message.user("hi")]
+    formatted = _gfmt().format_messages(msgs, {})
+    body = _gfmt().build_body(
+        model="gemini-2.0-flash",
+        messages=formatted,
+        system=_gfmt().system_prompt(msgs),
+        temperature=0.5,
+        top_p=0.9,
+        max_tokens=100,
+        extra_sampling={},
+        response_model=None,
+    )
+    assert "contents" in body
+    assert "model" not in body  # model goes in the URL
+    assert body["systemInstruction"] == {"parts": [{"text": "sys"}]}
+    assert body["generationConfig"]["temperature"] == 0.5
+    assert body["generationConfig"]["topP"] == 0.9
+    assert body["generationConfig"]["maxOutputTokens"] == 100
+
+
+def test_gemini_build_body_structured_output_in_gen_config() -> None:
+    body = _gfmt().build_body(
+        model="gemini-2.0-flash",
+        messages=[],
+        system=None,
+        temperature=None,
+        top_p=None,
+        max_tokens=None,
+        extra_sampling={},
+        response_model=_Foo,
+    )
+    assert body["generationConfig"]["responseMimeType"] == "application/json"
+    assert "properties" in body["generationConfig"]["responseSchema"]
+
+
+def test_gemini_build_body_no_gen_config_when_all_none() -> None:
+    body = _gfmt().build_body(
+        model="gemini-2.0-flash",
+        messages=[],
+        system=None,
+        temperature=None,
+        top_p=None,
+        max_tokens=None,
+        extra_sampling={},
+        response_model=None,
+    )
+    assert "generationConfig" not in body
+
+
+# ============================================================ GeminiFormatter — response
+
+
+def test_gemini_extract_text() -> None:
+    data = {
+        "candidates": [{"content": {"parts": [{"text": "hello"}]}, "finishReason": "STOP"}]
+    }
+    assert _gfmt().extract_text(data) == "hello"
+
+
+def test_gemini_extract_text_concatenates_parts() -> None:
+    data = {
+        "candidates": [{"content": {"parts": [{"text": "foo"}, {"text": "bar"}]}}]
+    }
+    assert _gfmt().extract_text(data) == "foobar"
+
+
+def test_gemini_extract_usage() -> None:
+    data = {"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5}}
+    assert _gfmt().extract_usage(data) == (10, 5, 15)
+
+
+def test_gemini_extract_usage_missing_returns_zeros() -> None:
+    assert _gfmt().extract_usage({}) == (0, 0, 0)
+
+
+def test_gemini_finish_reason() -> None:
+    data = {"candidates": [{"finishReason": "STOP"}]}
+    assert _gfmt().finish_reason(data) == "STOP"
+
+
+def test_gemini_finish_reason_missing_returns_none() -> None:
+    assert _gfmt().finish_reason({}) is None

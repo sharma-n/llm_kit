@@ -31,6 +31,17 @@ that test, not by raw capability gap.
   and `benchmarks/embed_throughput.py`. RAG storage/retrieval was explicitly
   scoped **out** — see the "Identity fork" section to take it further.
 
+- **Provider formatters — Anthropic + Gemini.** `AnthropicFormatter` and
+  `GeminiFormatter` in [`messages/formatter.py`](src/llm_kit/messages/formatter.py),
+  selected via `LLMConfig.message_format` (`openai` / `anthropic` / `gemini`). Each
+  formatter owns both sides of the wire: full request body assembly (`build_body`,
+  which handles provider-specific body shape, key names, and sampling parameter
+  placement) and response parsing (`extract_text`, `extract_usage`, `finish_reason`).
+  Structured output uses each provider's native mechanism — `response_format` for
+  OpenAI, `output_config.format` for Anthropic, `generationConfig.responseSchema`
+  for Gemini. Nothing in `LLMClient` changed; adding a fourth provider is a new
+  formatter class only.
+
 ---
 
 ## Moat-deepening — make the batch engine better
@@ -52,11 +63,6 @@ is the recommended near-term order.
 3. **Response caching / dedup.** Mirror the image-fetcher LRU at the response
    layer, keyed by a hash of messages + params. In a 1M batch with repeated
    prompts this is real money saved; the pattern already exists in `images/`.
-4. **Anthropic-native formatter.** Cheap and low-risk: CLAUDE.md invariant #2
-   already reserves the seam, so this is a wire-format addition, not a new layer
-   of statefulness. Unlocks Claude's native content/tool-use shape without
-   touching the LLM client. Target the latest Claude models (Opus 4.x / Fable 5)
-   as the default.
 
 ---
 
@@ -111,8 +117,8 @@ whenever it starts paying for itself.
 
 ## Suggested order
 
-Provider-native batch API → cost accounting → response caching → Anthropic
-formatter. These four keep the kit firmly in its lane and each one deepens the
-batch engine. Only *after* that, if the project's identity is meant to widen,
-take up the agent loop or RAG as a conscious fork. Cross-cutting infra slots in
-whenever it starts paying for itself.
+Provider-native batch API → cost accounting → response caching. These three keep
+the kit firmly in its lane and each one deepens the batch engine. Only *after*
+that, if the project's identity is meant to widen, take up the agent loop or RAG
+as a conscious fork. Cross-cutting infra slots in whenever it starts paying for
+itself.

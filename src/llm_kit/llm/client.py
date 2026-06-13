@@ -27,7 +27,7 @@ from llm_kit.http.session import build_async_client
 from llm_kit.images.fetcher import ImageFetcher
 from llm_kit.llm.base import BaseLLM
 from llm_kit.llm.response import BatchItem, BatchResult, LLMResponse, TokenUsage
-from llm_kit.messages.formatter import AnthropicFormatter, OpenAIFormatter
+from llm_kit.messages.formatter import AnthropicFormatter, GeminiFormatter, OpenAIFormatter
 from llm_kit.messages.types import Message
 from llm_kit.rate_limit.limiter import RateLimiter, TokenEstimator
 
@@ -52,7 +52,9 @@ class LLMClient(BaseLLM):
         self._owns_client = client is None if owns_client is None else owns_client
 
         if config.llm.message_format is MessageFormat.ANTHROPIC:
-            self._formatter: AnthropicFormatter | OpenAIFormatter = AnthropicFormatter()
+            self._formatter: AnthropicFormatter | GeminiFormatter | OpenAIFormatter = AnthropicFormatter()
+        elif config.llm.message_format is MessageFormat.GEMINI:
+            self._formatter = GeminiFormatter()
         else:
             self._formatter = OpenAIFormatter(
                 structured_output_style=config.llm.structured_output_style
@@ -157,21 +159,16 @@ class LLMClient(BaseLLM):
         overrides: dict[str, Any] | None,
     ) -> dict[str, Any]:
         cfg = self._config.llm
-        system = self._formatter.system_prompt(messages)
-        body: dict[str, Any] = {
-            "model": cfg.model,
-            "messages": self._formatter.format_messages(messages, encoded_images),
-        }
-        if system is not None:
-            body["system"] = system
-        if cfg.temperature is not None:
-            body["temperature"] = cfg.temperature
-        if cfg.top_p is not None:
-            body["top_p"] = cfg.top_p
-        if cfg.max_tokens is not None:
-            body["max_tokens"] = cfg.max_tokens
-        body.update(cfg.extra_sampling)
-        body.update(self._formatter.structured_output_fields(response_model))
+        body = self._formatter.build_body(
+            model=cfg.model,
+            messages=self._formatter.format_messages(messages, encoded_images),
+            system=self._formatter.system_prompt(messages),
+            temperature=cfg.temperature,
+            top_p=cfg.top_p,
+            max_tokens=cfg.max_tokens,
+            extra_sampling=cfg.extra_sampling,
+            response_model=response_model,
+        )
         if overrides:
             body.update(overrides)
         return body

@@ -11,13 +11,14 @@ class MessageFormat(StrEnum):
 
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
+    GEMINI = "gemini"
 
 
 class StructuredOutputStyle(StrEnum):
     """How the provider expects structured-output schemas to be passed.
 
-    Only applies to the OpenAI formatter; Anthropic always uses its own tool-use
-    shape and ignores this setting.
+    Only applies to the OpenAI formatter; Anthropic and Gemini use their own
+    native structured-output shapes and ignore this setting.
     """
 
     OPENAI_JSON_SCHEMA = "openai_json_schema"
