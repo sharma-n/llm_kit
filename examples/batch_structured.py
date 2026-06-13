@@ -13,7 +13,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from llm_kit import BatchItem, Message, OpenAICompatibleLLM
+from llm_kit import BatchItem, Message, LLMClient
 
 
 class ImageCaption(BaseModel):
@@ -43,7 +43,7 @@ async def main() -> None:
     config_path = Path(__file__).with_name("config.yaml")
     output_path = Path(__file__).with_name("batch_output.jsonl")
 
-    async with OpenAICompatibleLLM.from_yaml(str(config_path)) as llm:
+    async with LLMClient.from_yaml(str(config_path)) as llm:
         written = await llm.batch_to_jsonl(make_items(), output_path, resume=True)
 
     print(f"wrote {written} results to {output_path}")

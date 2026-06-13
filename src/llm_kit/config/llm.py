@@ -6,11 +6,18 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 
+class MessageFormat(StrEnum):
+    """Which wire format to use for message encoding and response parsing."""
+
+    OPENAI = "openai"
+    ANTHROPIC = "anthropic"
+
+
 class StructuredOutputStyle(StrEnum):
     """How the provider expects structured-output schemas to be passed.
 
-    Why: not every OpenAI-compatible endpoint accepts ``response_format`` in the
-    same shape. Override per provider so swapping endpoints is config-only.
+    Only applies to the OpenAI formatter; Anthropic always uses its own tool-use
+    shape and ignores this setting.
     """
 
     OPENAI_JSON_SCHEMA = "openai_json_schema"
@@ -35,4 +42,5 @@ class LLMConfig:
     extra_sampling: dict[str, object] = field(default_factory=dict)
     extra_headers: dict[str, str] = field(default_factory=dict)
 
+    message_format: MessageFormat = MessageFormat.OPENAI
     structured_output_style: StructuredOutputStyle = StructuredOutputStyle.OPENAI_JSON_SCHEMA

@@ -1,4 +1,4 @@
-"""Tests for OpenAICompatibleLLM against an httpx.MockTransport."""
+"""Tests for LLMClient against an httpx.MockTransport."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from llm_kit.config.llm import StructuredOutputStyle
 from llm_kit.errors import AuthError, ProviderError, ValidationError
-from llm_kit.llm.openai_compat import OpenAICompatibleLLM
+from llm_kit.llm.client import LLMClient
 from llm_kit.messages.types import Message
 
 from conftest import chat_response, make_config, mock_client, tool_use_response
@@ -25,10 +25,10 @@ class _Capture:
         self.body: dict[str, Any] | None = None
 
 
-def _make_llm(handler, **cfg_overrides) -> tuple[OpenAICompatibleLLM, httpx.AsyncClient]:
+def _make_llm(handler, **cfg_overrides) -> tuple[LLMClient, httpx.AsyncClient]:
     client = mock_client(handler)
     cfg = make_config(**cfg_overrides)
-    llm = OpenAICompatibleLLM(cfg, client=client, owns_client=True)
+    llm = LLMClient(cfg, client=client, owns_client=True)
     return llm, client
 
 

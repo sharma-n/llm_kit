@@ -5,12 +5,12 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from llm_kit import Message, OpenAICompatibleLLM
+from llm_kit import Message, LLMClient
 
 
 async def main() -> None:
     config_path = Path(__file__).with_name("config.yaml")
-    async with OpenAICompatibleLLM.from_yaml(str(config_path)) as llm:
+    async with LLMClient.from_yaml(str(config_path)) as llm:
         response = await llm.invoke(
             [
                 Message.system("You are a terse assistant."),

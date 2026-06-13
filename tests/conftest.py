@@ -17,7 +17,7 @@ from llm_kit.config.image import ImageConfig
 from llm_kit.config.llm import LLMConfig
 from llm_kit.config.rate_limit import RateLimitConfig
 from llm_kit.llm.base import BaseLLM
-from llm_kit.llm.openai_compat import OpenAICompatibleLLM
+from llm_kit.llm.client import LLMClient
 from llm_kit.llm.response import BatchItem, BatchResult, LLMResponse, TokenUsage
 from llm_kit.messages.types import Message
 

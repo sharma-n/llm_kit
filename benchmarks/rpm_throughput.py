@@ -1,7 +1,7 @@
 """Benchmark: verify the configured RPM cap is actually enforced.
 
 Setup:
-- Real ``OpenAICompatibleLLM`` against an ``httpx.MockTransport``.
+- Real ``LLMClient`` against an ``httpx.MockTransport``.
 - Chat handler sleeps ``LATENCY_SECONDS`` to simulate a slow LLM.
 - Image handler returns a tiny fake PNG (cached after first fetch).
 - Batch of N items, each with 1–4 random image URLs drawn from a small pool.
@@ -42,7 +42,7 @@ from llm_kit.config.http import HTTPConfig, RetryConfig
 from llm_kit.config.image import ImageConfig, ImageFailurePolicy
 from llm_kit.config.llm import LLMConfig
 from llm_kit.config.rate_limit import RateLimitConfig
-from llm_kit.llm.openai_compat import OpenAICompatibleLLM
+from llm_kit.llm.client import LLMClient
 from llm_kit.llm.response import BatchItem
 from llm_kit.messages.types import Message
 
@@ -221,7 +221,7 @@ async def run(
     client = httpx.AsyncClient(
         transport=httpx.MockTransport(make_handler(stats, image_latency_seconds))
     )
-    llm = OpenAICompatibleLLM(cfg, client=client, owns_client=True)
+    llm = LLMClient(cfg, client=client, owns_client=True)
 
     items = make_items(items_count)
     completed = 0

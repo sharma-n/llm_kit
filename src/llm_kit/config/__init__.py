@@ -5,7 +5,7 @@ from llm_kit.config.batch import BatchConfig
 from llm_kit.config.embed import EmbeddingConfig
 from llm_kit.config.http import HTTPConfig, RetryConfig
 from llm_kit.config.image import ImageConfig
-from llm_kit.config.llm import LLMConfig, StructuredOutputStyle
+from llm_kit.config.llm import LLMConfig, MessageFormat, StructuredOutputStyle
 from llm_kit.config.rate_limit import RateLimitConfig
 
 __all__ = [
@@ -15,6 +15,7 @@ __all__ = [
     "HTTPConfig",
     "ImageConfig",
     "LLMConfig",
+    "MessageFormat",
     "RateLimitConfig",
     "RetryConfig",
     "StructuredOutputStyle",

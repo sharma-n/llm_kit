@@ -1,7 +1,7 @@
 """OpenAI-compatible embeddings client.
 
 Targets any endpoint speaking ``POST /v1/embeddings`` with the OpenAI
-request/response shape. Sits at the same layer as ``OpenAICompatibleLLM`` and
+request/response shape. Sits at the same layer as ``LLMClient`` and
 reuses the same shared ``httpx.AsyncClient``, retry wrapper, rate limiter, and
 error hierarchy.
 

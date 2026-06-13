@@ -32,10 +32,10 @@ The package is `llm_kit`.
 
 ```python
 import asyncio
-from llm_kit import Message, OpenAICompatibleLLM
+from llm_kit import Message, LLMClient
 
 async def main():
-    async with OpenAICompatibleLLM.from_yaml("examples/config.yaml") as llm:
+    async with LLMClient.from_yaml("examples/config.yaml") as llm:
         response = await llm.invoke([
             Message.system("You are a terse assistant."),
             Message.user("In one sentence, what is the capital of France?"),
@@ -219,7 +219,7 @@ Three gates layered together, all in `RateLimitConfig`:
 
 1. **Concurrency semaphore** (`max_concurrent_requests`) — caps in-flight HTTP requests to the LLM.
 2. **RPM token bucket** — refills at `requests_per_minute / 60` per second. Honors `Retry-After` if the server sends one on a 429.
-3. **TPM token bucket** (optional) — same shape but token-sized. The default estimator is `chars / 4`; pass a real tokenizer via `OpenAICompatibleLLM(config, token_estimator=fn)` for accuracy. After each response, the bucket is **trued up** with the response's reported `usage.total_tokens` so drift doesn't accumulate.
+3. **TPM token bucket** (optional) — same shape but token-sized. The default estimator is `chars / 4`; pass a real tokenizer via `LLMClient(config, token_estimator=fn)` for accuracy. After each response, the bucket is **trued up** with the response's reported `usage.total_tokens` so drift doesn't accumulate.
 
 A request must acquire all configured gates before being issued.
 
@@ -342,7 +342,7 @@ src/llm_kit/
   rate_limit/    # token bucket + composed limiter (sem + RPM + TPM)
   images/        # async fetch + LRU cache + base64 encode
   messages/      # Message dataclass + OpenAI wire-format adapter
-  llm/           # BaseLLM + OpenAICompatibleLLM + LLMResponse
+  llm/           # BaseLLM + LLMClient + LLMResponse
   embed/         # OpenAICompatibleEmbedder + micro-batching driver + jsonl
   batch/         # bounded pipeline + jsonl writer + ID-based resume
   errors.py      # typed exception hierarchy
