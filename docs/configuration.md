@@ -71,4 +71,4 @@ llm:
 
 For Gemini the model name lives in `chat_completions_path` (not in `model`), because Gemini embeds it in the URL.
 
-> Token streaming and tool-call parsing are implemented for the **OpenAI** and **Anthropic** wire formats; Gemini raises `NotImplementedError` if you request `tools`/streaming (a fast-follow). All three support non-streaming `invoke`, structured outputs, and the batch paths.
+> Token streaming and tool-call parsing are implemented for **all three** wire formats — OpenAI, Anthropic, and Gemini. (Gemini streams from a different URL — `:streamGenerateContent?alt=sse` — which the formatter derives automatically; no extra config needed.) All three also support non-streaming `invoke`, structured outputs, and the batch paths.

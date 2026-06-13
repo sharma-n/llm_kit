@@ -29,6 +29,8 @@ from llm_kit.config.llm import MessageFormat
 from conftest import (
     anthropic_sse,
     anthropic_text_stream,
+    gemini_sse,
+    gemini_text_stream,
     make_config,
     mock_client,
     openai_text_stream,
@@ -44,6 +46,13 @@ def _make_llm(client: httpx.AsyncClient) -> LLMClient:
 def _make_anthropic_llm(client: httpx.AsyncClient) -> LLMClient:
     cfg = make_config()
     cfg.llm.message_format = MessageFormat.ANTHROPIC
+    return LLMClient(cfg, client=client, owns_client=True)
+
+
+def _make_gemini_llm(client: httpx.AsyncClient) -> LLMClient:
+    cfg = make_config()
+    cfg.llm.message_format = MessageFormat.GEMINI
+    cfg.llm.chat_completions_path = "/v1beta/models/gemini-test:generateContent"
     return LLMClient(cfg, client=client, owns_client=True)
 
 
@@ -193,6 +202,88 @@ async def test_anthropic_tool_call_stream_reassembled() -> None:
     assert end.response.tool_calls[0].arguments == {"flight": "UA1"}
     assert end.response.finish_reason == "tool_use"
     assert end.response.usage.total_tokens == 9  # input 3 + output 6
+
+
+# ------------------------------------------------------------------ gemini
+
+
+async def test_gemini_text_stream_yields_chunks_then_end() -> None:
+    body = gemini_text_stream(["Hel", "lo ", "world"], prompt_tokens=11, completion_tokens=5)
+    llm = _make_gemini_llm(stream_mock_client(body))
+    async with llm:
+        events = await _collect(llm.invoke_stream([Message.user("hi")]))
+
+    texts = [e.text for e in events if isinstance(e, TextChunk)]
+    assert texts == ["Hel", "lo ", "world"]
+
+    end = events[-1]
+    assert isinstance(end, StreamEnd)
+    assert end.response.text == "Hello world"
+    assert end.response.model == "gemini-test"
+    assert end.response.finish_reason == "STOP"
+    assert end.response.usage.total_tokens == 16
+
+
+async def test_gemini_tool_call_stream_parsed() -> None:
+    # Gemini streams a functionCall whole in one chunk (args is a complete dict).
+    chunks = [
+        {
+            "candidates": [
+                {
+                    "content": {
+                        "role": "model",
+                        "parts": [
+                            {"functionCall": {"name": "book", "args": {"flight": "UA1"}}}
+                        ],
+                    }
+                }
+            ],
+            "modelVersion": "gemini-test",
+        },
+        {
+            "candidates": [
+                {"content": {"role": "model", "parts": [{"text": ""}]}, "finishReason": "STOP"}
+            ],
+            "modelVersion": "gemini-test",
+            "usageMetadata": {
+                "promptTokenCount": 3,
+                "candidatesTokenCount": 6,
+                "totalTokenCount": 9,
+            },
+        },
+    ]
+    llm = _make_gemini_llm(stream_mock_client(gemini_sse(chunks)))
+    async with llm:
+        collected = await _collect(llm.invoke_stream([Message.user("book")], tools=[]))
+
+    started = [e for e in collected if isinstance(e, ToolCallStarted)]
+    assert len(started) == 1
+    assert started[0].name == "book"
+
+    end = collected[-1]
+    assert isinstance(end, StreamEnd)
+    assert len(end.response.tool_calls) == 1
+    assert end.response.tool_calls[0].arguments == {"flight": "UA1"}
+    assert end.response.finish_reason == "STOP"
+    assert end.response.usage.total_tokens == 9
+
+
+async def test_gemini_streaming_hits_sse_endpoint() -> None:
+    seen: dict[str, str] = {}
+    body = gemini_text_stream(["ok"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        return httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+
+    llm = _make_gemini_llm(mock_client(handler))
+    async with llm:
+        await _collect(llm.invoke_stream([Message.user("hi")]))
+
+    assert "streamGenerateContent" in seen["url"]
+    assert "alt=sse" in seen["url"]
 
 
 # --------------------------------------------------------------- response_model

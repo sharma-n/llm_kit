@@ -1,158 +1,131 @@
 # Roadmap — extension ideas
 
-## What this kit is (and the one test for every item below)
+## What this kit is
 
 `llm_kit` is a **stateless, high-throughput batch engine** for chat completions
 and embeddings. Its load-bearing strength is the bounded batch pipeline
-(O(buffer), not O(N), resumable from the output jsonl) plus strict bottom-up
+(O(buffer), not O(N); resumable from the output jsonl) plus strict bottom-up
 layering (`config → http → rate_limit/images/messages → llm/embed → batch`).
 
-That is a deliberately *narrow* identity. It is not a general-purpose LLM
-framework, and the difference matters: a framework optimizes for "can it talk to
-anything" (breadth, integrations, swappable components — and the leaky
-abstractions and version churn that come with them). This kit optimizes for "can
-it process a million things without falling over." Those are different products.
-
-So every item below gets one test:
+The guiding principle for everything below is one question:
 
 > **Does it make a large batch job cheaper, faster, more reliable, or more
-> resumable? Or does it just make `llm_kit` more *general*?**
+> resumable?**
 
-The first deepens the moat. The second dissolves it — and the second is where
-"am I just rebuilding LangChain?" comes from, correctly. Items are grouped by
-that test, not by raw capability gap.
+That is the bar. Capabilities that only make the kit more *general-purpose*
+(swappable everything, broad integrations, the version churn and leaky
+abstractions that come with them) are a different product and aren't tracked
+here.
+
+One boundary is worth stating: `llm_kit` **parses** tool calls —
+pure wire decoding, which is squarely the formatter's job (invariant #2) — but
+it does **not execute** them. The execution loop, tool-result feedback, and
+bounded multi-step orchestration are stateful; they live in the `agent_kit`
+sibling project (SPEC.md), built *on* this engine and never folded into the
+batch path. Streaming is likewise single-call only — it never touches the
+batch pipeline.
 
 ---
 
 ## ✅ Done
 
-- **Embeddings + micro-batching driver.** `OpenAICompatibleEmbedder`, a dedicated
-  chunking driver (chunk-as-unit, see CLAUDE.md invariant #9), jsonl resume sink,
-  and `benchmarks/embed_throughput.py`. RAG storage/retrieval was explicitly
-  scoped **out** — see the "Identity fork" section to take it further.
+- **Embeddings + micro-batching driver.** `OpenAICompatibleEmbedder` with a
+  dedicated chunk-as-unit packer (CLAUDE.md invariant #9), jsonl resume sink, and
+  `benchmarks/embed_throughput.py`. RAG storage/retrieval was scoped out.
 
-- **Provider-native batch API (the "offline" driver).** [`provider_batch/`](src/llm_kit/provider_batch/):
-  submit a whole `list[BatchItem]` to a provider's 24h async batch endpoint, poll,
-  download, and reconcile into the same `BatchResult`s the live pipeline yields.
-  Same input/output contracts as `batch/`, entirely different middle (no worker
-  pool, no rate limiter). Two axes: request/response *bodies* reuse the formatter
-  + `parse_response`; *transport* is a `BatchBackend` selected by `message_format`.
-  Surface: `LLMClient.submit_batch` / `poll_batch` / `fetch_batch_results` /
-  `run_batch_api`, with a persistent `BatchJob` handle for cross-process resume.
-  All three backends are implemented against their documented Batch wire formats
-  (OpenAI Files+Batches file-upload; Anthropic Message Batches and Gemini Batch
-  Mode inline) and covered by mock-transport tests — no live-key integration
-  tests in-repo yet. Response caching (the next item) remains open.
+- **Provider-native batch API.** [`provider_batch/`](src/llm_kit/provider_batch/):
+  submit a `list[BatchItem]` to a provider's 24h async endpoint, poll, download,
+  and reconcile into the same `BatchResult`s the live pipeline yields. Request/
+  response *bodies* reuse the formatter; *transport* is a `BatchBackend` selected
+  by `message_format`. All three backends implemented (OpenAI file-upload;
+  Anthropic + Gemini inline), with a persistent `BatchJob` handle for
+  cross-process resume. Mock-transport tests only — no live-key tests in-repo.
 
 - **Cost & usage accounting.** [`batch/ledger.py`](src/llm_kit/batch/ledger.py):
-  `UsageLedger` accumulates `TokenUsage` across a batch run; `batch_to_jsonl` now
-  returns a `BatchSummary` (total items, ok/error counts, token totals, estimated
-  cost) instead of a bare item count. Pricing comes from two new opt-in fields on
-  `LLMConfig` (`prompt_cost_per_1m_tokens` / `completion_cost_per_1m_tokens`,
-  defaulting to `0.0`). Providers don't include dollar amounts in API responses —
-  only token counts — so these are set to the provider's published per-token rates
-  in config. For streaming (`batch_stream`) loops, `UsageLedger` is also exported
-  directly for manual accumulation.
+  `UsageLedger` accumulates token usage across a run; `batch_to_jsonl` returns a
+  `BatchSummary` (counts + token totals + estimated cost). Pricing is opt-in via
+  two `LLMConfig` fields set to the provider's published per-token rates.
 
-- **Streaming single calls + tool-call *parsing* (the agent-fork enablers).**
-  `LLMClient.invoke_stream` streams one call as a typed event sequence
-  (`TextChunk` → optional `ToolCallStarted` → terminal `StreamEnd` with the
-  assembled `LLMResponse`); `invoke` and `invoke_stream` both accept
-  `tools`/`tool_choice` and surface provider-agnostic `ToolCall`s. The hard,
-  provider-specific parts — SSE decoding and reassembling streamed tool-call
-  fragments — live in the formatter (`stream_events`, `extract_tool_calls`);
-  `StreamAssembler` (`llm/streaming.py`) is the provider-agnostic streaming analog
-  of `parse_response`. Scoped per the identity-fork rule below: **`llm_kit` parses
-  tool calls; it does not execute them**, and streaming is **single-call only,
-  never the batch path** (`retry_stream` retries only stream establishment).
-  Implemented for the OpenAI and Anthropic formatters; Gemini is the remaining
-  fast-follow (it raises `NotImplementedError` on `tools`/`stream` today, and its
-  streaming endpoint `:streamGenerateContent` needs a transport-level URL change
-  in `LLMClient`). This is the deliberate fork toward the `agent_kit` sibling
-  project (see SPEC.md).
+- **Streaming + tool-call parsing.** `LLMClient.invoke_stream` streams one call as
+  a typed event sequence (`TextChunk` → optional `ToolCallStarted` → terminal
+  `StreamEnd` with the assembled `LLMResponse`); `invoke` and `invoke_stream` both
+  accept `tools`/`tool_choice` and surface provider-agnostic `ToolCall`s. SSE
+  decoding and tool-call reassembly live in the formatter; `StreamAssembler` is
+  the provider-agnostic analog of `parse_response`.
 
-- **Provider formatters — Anthropic + Gemini.** `AnthropicFormatter` and
-  `GeminiFormatter` in [`messages/formatter.py`](src/llm_kit/messages/formatter.py),
-  selected via `LLMConfig.message_format` (`openai` / `anthropic` / `gemini`). Each
-  formatter owns both sides of the wire: full request body assembly (`build_body`,
-  which handles provider-specific body shape, key names, and sampling parameter
-  placement) and response parsing (`extract_text`, `extract_usage`, `finish_reason`).
-  Structured output uses each provider's native mechanism — `response_format` for
-  OpenAI, `output_config.format` for Anthropic, `generationConfig.responseSchema`
-  for Gemini. Nothing in `LLMClient` changed; adding a fourth provider is a new
-  formatter class only.
+- **Provider formatters — all three.** OpenAI, Anthropic, and Gemini wire formats
+  in the [`messages/formatter/`](src/llm_kit/messages/formatter/) package (one
+  module per provider), selected by `LLMConfig.message_format`. Each owns both
+  sides of the wire — body assembly, structured output via the provider's native
+  mechanism, response parsing, tools, and stream decoding (incl. Gemini's
+  streaming URL swap via `endpoint_path`). Adding a fourth provider is a new
+  formatter class; nothing in `LLMClient` changes.
 
 ---
 
 ## Moat-deepening — make the batch engine better
 
-These pass the test cleanly. Each makes a large job cheaper, faster, more
-reliable, or more resumable, and each reuses `http/session`, `http/retry`,
-`rate_limit`, the error hierarchy, and the batch pipeline almost verbatim. This
-is the recommended near-term order. (The provider-native batch API and cost
-accounting that used to head this list are now shipped — see the Done section.)
+Each of these passes the test cleanly and reuses `http/session`, `http/retry`,
+`rate_limit`, and the batch pipeline almost verbatim. Recommended near-term
+order.
 
-1. **Response caching / dedup.** Mirror the image-fetcher LRU at the response
-   layer, keyed by a hash of messages + params. In a 1M batch with repeated
-   prompts this is real money saved; the pattern already exists in `images/`.
+1. **Adaptive rate limiting.** The limiter is a fixed token bucket today; real
+   provider limits are often undocumented and time-varying. Feed `429` responses
+   and `Retry-After` headers back into the limiter to auto-tune RPM/TPM toward the
+   provider's *actual* ceiling — additive-increase on sustained success,
+   multiplicative-decrease on throttling. The signal is already observed in
+   `http/retry.py`; this just routes it into `rate_limit/`. Pure
+   throughput + reliability, and it removes the guesswork in hand-tuning caps.
+
+2. **Failure re-drive pass.** After a run, re-process *only* the items that came
+   back with a `BatchResult.error`. The output jsonl already records which ids
+   failed (invariant #6), so this is a thin filter over the existing resume
+   path: read the output, select error rows, re-feed their inputs. Turns a
+   partial batch into a complete one without re-paying for the successes — a
+   resumability + reliability win that's almost free given what's already there.
+
+3. **Cache-aware cost accounting.** Providers report cached-prompt tokens
+   separately (the cache-read/cache-write split from prompt caching) and price
+   them differently. The ledger currently folds everything into prompt/completion.
+   Surfacing cached-token counts and a third price field makes the `BatchSummary`
+   cost estimate *honest* when prompt caching is in play — which, for a batch with
+   a shared system prompt, is exactly when the savings are largest. Small, and it
+   ties cost accounting to the caching providers already do for us.
+
+4. **Real-tokenizer estimator (optional extra).** The default TPM estimator is
+   char/4; the constructor already takes `token_estimator=fn`. Shipping a
+   `tiktoken`-backed estimator behind a `[tokenizer]` extra tightens TPM
+   accounting, which means fewer surprise `429`s and a higher usable throughput
+   ceiling. Opt-in, never a core dep.
 
 ---
 
-## Identity fork — valuable, but a different project
+## Out of scope — a different project on purpose
 
-These are real capabilities, but they **fail the test**: they add general-purpose
-statefulness that pushes *against* the throughput core rather than deepening it.
-Doing them is a deliberate decision to become a different kind of project — make
-it on purpose, not as "next on the list."
+These are real capabilities, but they add general-purpose statefulness that
+pushes *against* the throughput core. Pursuing one is a deliberate decision to
+become a different project, not "next on the list."
 
-- **Tool-calling / agent loop.** The biggest capability gap vs. the README's
-  "agentic systems" framing — and the item that fights the moat hardest. Each
-  item becomes a *multi-step* unit, so the O(buffer) memory and per-item-failure
-  isolation invariants need a deliberate extension, not a bolt-on. This is also
-  precisely the LangChain/LangGraph surface area, where the work is already
-  commoditized. **Update:** the *parsing* half is now shipped (see Done — tool
-  defs in, provider-agnostic `ToolCall`s out, for both `invoke` and
-  `invoke_stream`); what stays forked is everything *stateful* — the execution
-  loop, tool result feedback, timeouts, and bounded multi-step orchestration.
-  That lives in the `agent_kit` sibling project (SPEC.md), built *on* the engine,
-  never folded into the batch path.
-- **RAG (storage + retrieval).** "The interface is the product" is the LangChain
-  thesis verbatim, and shipping vector-store adapters puts you in the
-  integration-maintenance business that is LangChain's whole burden. If pursued:
-  - **Chunker** — token-aware splitter with overlap. Small, owned, the most
-    batch-adjacent piece.
-  - **`VectorStore` Protocol** — `add(ids, vectors, metadata)` / `search(query, k)`.
-  - **One built-in impl** — in-memory numpy cosine index, honest to ~10⁵–10⁶
-    vectors, clearly labeled as not a production vector DB (behind a `[rag]` extra).
-  - **Adapters as optional extras** — pgvector / FAISS / Qdrant behind the
-    Protocol, *never* core deps.
-  - **`Retriever`** — query-embed + store-search, returns context for the chat
-    client.
-- **Streaming `invoke()`.** ✅ Shipped as `invoke_stream` (see Done), scoped
-  strictly to single calls, never the batch path — exactly as this item required.
+- **Agent execution loop.** Multi-step tool execution, observation feedback,
+  timeouts, orchestration. The *parsing* half is shipped (see Done); everything
+  *stateful* lives in `agent_kit` (SPEC.md), built on the engine.
+
+- **RAG (storage + retrieval).** Vector-store adapters put you in the
+  integration-maintenance business this kit exists to avoid. If ever pursued, the
+  only genuinely batch-adjacent piece is a token-aware **chunker**; a `VectorStore`
+  Protocol + in-memory impl + pgvector/FAISS/Qdrant adapters would all be optional
+  extras behind a `[rag]` flag, never core.
 
 ---
 
 ## Cross-cutting infrastructure
 
-Multiplies the value of everything above; infrastructure, not features. Slots in
-whenever it starts paying for itself.
+Multiplies the value of everything above; slots in whenever it starts paying for
+itself.
 
-- **Observability.** OpenTelemetry spans + metrics around the request path
-  (latency, retries, token counts, queue depths). Most valuable while the engine
-  is the product — it makes throughput legible.
-- **Middleware / interceptor hooks.** Pre/post-request: redaction, prompt
-  templating, content-based retry. Generic framework furniture — useful but
-  breadth, not depth.
-- **Prompt management / templating.** Versioned prompts, variable injection. Same
-  caveat — general-purpose, not throughput-specific.
-
----
-
-## Suggested order
-
-Provider-native batch API (✅ done) → cost accounting (✅ done) → response
-caching. These keep the kit firmly in its lane and each one deepens the batch
-engine. Only *after* response caching, if the project's identity is meant to
-widen, take up the agent loop or RAG as a conscious fork. Cross-cutting infra
-slots in whenever it starts paying for itself.
+- **Observability.** OpenTelemetry spans + metrics on the request path (latency,
+  retries, token counts, queue depths). Most valuable while the engine is the
+  product — it makes throughput legible, and it's the natural source of the
+  signals item #1 (adaptive limiting) consumes.
+- **Middleware / interceptor hooks.** Pre/post-request redaction, templating,
+  content-based retry. Useful, but breadth rather than depth.

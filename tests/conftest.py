@@ -282,6 +282,85 @@ def anthropic_text_stream(
     return anthropic_sse(events)
 
 
+def gemini_tool_response(
+    *,
+    tool_calls: list[dict[str, Any]],
+    text: str | None = None,
+    model: str = "gemini-test",
+    finish_reason: str = "STOP",
+    prompt_tokens: int = 5,
+    completion_tokens: int = 4,
+) -> dict[str, Any]:
+    """Gemini ``generateContent`` response carrying ``functionCall`` parts.
+
+    Each entry in ``tool_calls`` is ``{"name", "args"}`` where ``args`` is the
+    already-parsed dict Gemini returns (and an optional ``id``).
+    """
+    parts: list[dict[str, Any]] = []
+    if text is not None:
+        parts.append({"text": text})
+    for tc in tool_calls:
+        fc: dict[str, Any] = {"name": tc["name"], "args": tc["args"]}
+        if "id" in tc:
+            fc["id"] = tc["id"]
+        parts.append({"functionCall": fc})
+    return {
+        "candidates": [
+            {
+                "content": {"role": "model", "parts": parts},
+                "finishReason": finish_reason,
+            }
+        ],
+        "modelVersion": model,
+        "usageMetadata": {
+            "promptTokenCount": prompt_tokens,
+            "candidatesTokenCount": completion_tokens,
+            "totalTokenCount": prompt_tokens + completion_tokens,
+        },
+    }
+
+
+def gemini_sse(chunks: list[dict[str, Any]]) -> bytes:
+    """Serialize Gemini ``GenerateContentResponse`` chunks as an SSE body."""
+    return "".join(f"data: {json.dumps(c)}\n\n" for c in chunks).encode()
+
+
+def gemini_text_stream(
+    text_pieces: list[str],
+    *,
+    model: str = "gemini-test",
+    finish_reason: str = "STOP",
+    prompt_tokens: int = 7,
+    completion_tokens: int = 3,
+) -> bytes:
+    """A simple text-only Gemini ``streamGenerateContent`` SSE stream.
+
+    Mirrors Gemini's behaviour: each chunk carries a text part; the terminal
+    chunk carries ``finishReason`` and the cumulative ``usageMetadata``.
+    """
+    chunks: list[dict[str, Any]] = [
+        {
+            "candidates": [{"content": {"role": "model", "parts": [{"text": piece}]}}],
+            "modelVersion": model,
+        }
+        for piece in text_pieces
+    ]
+    chunks.append(
+        {
+            "candidates": [
+                {"content": {"role": "model", "parts": [{"text": ""}]}, "finishReason": finish_reason}
+            ],
+            "modelVersion": model,
+            "usageMetadata": {
+                "promptTokenCount": prompt_tokens,
+                "candidatesTokenCount": completion_tokens,
+                "totalTokenCount": prompt_tokens + completion_tokens,
+            },
+        }
+    )
+    return gemini_sse(chunks)
+
+
 def sse_bytes(chunks: list[dict[str, Any]], *, done: bool = True) -> bytes:
     """Serialize chunk dicts as an OpenAI-style ``text/event-stream`` body."""
     parts = [f"data: {json.dumps(c)}\n\n" for c in chunks]
@@ -443,6 +522,9 @@ __all__ = [
     "chat_response",
     "embedding_response",
     "fake_llm",
+    "gemini_sse",
+    "gemini_text_stream",
+    "gemini_tool_response",
     "make_config",
     "make_items",
     "mock_client",

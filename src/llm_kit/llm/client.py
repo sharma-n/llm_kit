@@ -1,4 +1,4 @@
-"""LLM client for any endpoint that speaks the OpenAI or Anthropic wire format.
+"""LLM client for any endpoint that speaks the OpenAI, Anthropic, or Gemini wire format.
 
 Provider-specific logic (message encoding, response parsing, auth headers) is
 fully delegated to the active formatter — the client itself is wire-format agnostic.
@@ -155,7 +155,7 @@ class LLMClient(BaseLLM):
             async with retry_stream(
                 lambda: self._client.stream(
                     "POST",
-                    self._endpoint(),
+                    self._endpoint(stream=True),
                     headers=self._headers(),
                     json=body,
                 ),
@@ -303,9 +303,13 @@ class LLMClient(BaseLLM):
             return os.environ.get(config.api_key_env)
         return None
 
-    def _endpoint(self) -> str:
+    def _endpoint(self, *, stream: bool = False) -> str:
         base = self._config.llm.base_url.rstrip("/")
-        path = self._config.llm.chat_completions_path
+        # The formatter owns any wire-specific URL adjustment (e.g. Gemini's
+        # :streamGenerateContent?alt=sse for streaming); the client is agnostic.
+        path = self._formatter.endpoint_path(
+            self._config.llm.chat_completions_path, stream=stream
+        )
         if not path.startswith("/"):
             path = "/" + path
         return base + path

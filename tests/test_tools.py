@@ -6,7 +6,6 @@ import json
 from typing import Any
 
 import httpx
-import pytest
 
 from llm_kit.config.llm import StructuredOutputStyle
 from llm_kit.llm.client import LLMClient
@@ -22,6 +21,7 @@ from llm_kit.config.llm import MessageFormat
 
 from conftest import (
     anthropic_tool_response,
+    gemini_tool_response,
     make_config,
     mock_client,
     tool_call_response,
@@ -41,6 +41,12 @@ def _make_llm(handler, **cfg) -> LLMClient:
 def _make_anthropic_llm(handler) -> LLMClient:
     cfg = make_config()
     cfg.llm.message_format = MessageFormat.ANTHROPIC
+    return LLMClient(cfg, client=mock_client(handler), owns_client=True)
+
+
+def _make_gemini_llm(handler) -> LLMClient:
+    cfg = make_config()
+    cfg.llm.message_format = MessageFormat.GEMINI
     return LLMClient(cfg, client=mock_client(handler), owns_client=True)
 
 
@@ -139,22 +145,6 @@ def test_message_tool_calls_render_to_openai_wire() -> None:
     assert json.loads(tc["function"]["arguments"]) == {"flight": "UA1"}
 
     assert wire[2] == {"role": "tool", "tool_call_id": "call_1", "content": "booked"}
-
-
-@pytest.mark.parametrize("fmt", [GeminiFormatter()])
-def test_gemini_tools_not_implemented(fmt) -> None:
-    with pytest.raises(NotImplementedError):
-        fmt.build_body(
-            model="m",
-            messages=[],
-            system=None,
-            temperature=None,
-            top_p=None,
-            max_tokens=None,
-            extra_sampling={},
-            response_model=None,
-            tools=[WEATHER],
-        )
 
 
 # ----------------------------------------------------------------- anthropic
@@ -271,6 +261,129 @@ def test_anthropic_tool_choice_specific_tool_name() -> None:
         tool_choice="get_weather",
     )
     assert body["tool_choice"] == {"type": "tool", "name": "get_weather"}
+
+
+# ------------------------------------------------------------------- gemini
+
+
+async def test_gemini_invoke_with_tools_returns_parsed_tool_calls() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=gemini_tool_response(
+                tool_calls=[{"name": "get_weather", "args": {"city": "Paris"}}]
+            ),
+        )
+
+    llm = _make_gemini_llm(handler)
+    async with llm:
+        resp = await llm.invoke([Message.user("weather?")], tools=[WEATHER])
+
+    assert resp.tool_calls == [
+        ToolCall(id="call_0", name="get_weather", arguments={"city": "Paris"})
+    ]
+    assert resp.finish_reason == "STOP"
+
+
+async def test_gemini_tools_rendered_into_request_body() -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content.decode()))
+        return httpx.Response(
+            200,
+            json=gemini_tool_response(
+                tool_calls=[{"name": "get_weather", "args": {}}]
+            ),
+        )
+
+    llm = _make_gemini_llm(handler)
+    async with llm:
+        await llm.invoke([Message.user("hi")], tools=[WEATHER], tool_choice="required")
+
+    # Gemini shape: functionDeclarations nest under a single tools entry.
+    assert seen["tools"][0]["functionDeclarations"][0] == {
+        "name": "get_weather",
+        "description": "Look up the weather",
+        "parameters": WEATHER.parameters,
+    }
+    # "required" maps to functionCallingConfig mode ANY.
+    assert seen["toolConfig"] == {"functionCallingConfig": {"mode": "ANY"}}
+
+
+def test_gemini_message_tool_calls_render_to_wire() -> None:
+    fmt = GeminiFormatter()
+    msgs = [
+        Message.user("book it"),
+        Message.assistant_tool_calls(
+            [ToolCall(id="call_0", name="book", arguments={"flight": "UA1"})]
+        ),
+        Message.tool_result("call_0", "booked"),
+    ]
+    wire = fmt.format_messages(msgs, {})
+
+    # Assistant turn: a model-role content with a functionCall part (args is a dict).
+    assert wire[1]["role"] == "model"
+    assert wire[1]["parts"] == [
+        {"functionCall": {"name": "book", "args": {"flight": "UA1"}}}
+    ]
+    # Tool result becomes a user content with a functionResponse part; the name
+    # is recovered from the preceding assistant call (Gemini matches by name).
+    assert wire[2] == {
+        "role": "user",
+        "parts": [
+            {"functionResponse": {"name": "book", "response": {"result": "booked"}}}
+        ],
+    }
+
+
+def test_gemini_coalesces_adjacent_tool_results() -> None:
+    fmt = GeminiFormatter()
+    msgs = [
+        Message.assistant_tool_calls(
+            [
+                ToolCall(id="call_0", name="f", arguments={}),
+                ToolCall(id="call_1", name="g", arguments={}),
+            ]
+        ),
+        Message.tool_result("call_0", "ra"),
+        Message.tool_result("call_1", "rb"),
+    ]
+    wire = fmt.format_messages(msgs, {})
+
+    # The two function responses collapse into ONE user turn.
+    assert len(wire) == 2
+    assert wire[1]["role"] == "user"
+    assert [p["functionResponse"]["name"] for p in wire[1]["parts"]] == ["f", "g"]
+
+
+def test_gemini_tool_choice_specific_tool_name() -> None:
+    fmt = GeminiFormatter()
+    body = fmt.build_body(
+        model="m",
+        messages=[],
+        system=None,
+        temperature=None,
+        top_p=None,
+        max_tokens=None,
+        extra_sampling={},
+        response_model=None,
+        tools=[WEATHER],
+        tool_choice="get_weather",
+    )
+    assert body["toolConfig"] == {
+        "functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": ["get_weather"]}
+    }
+
+
+def test_gemini_streaming_endpoint_path() -> None:
+    fmt = GeminiFormatter()
+    path = "/v1beta/models/gemini-2.0-flash:generateContent"
+    assert fmt.endpoint_path(path, stream=False) == path
+    assert (
+        fmt.endpoint_path(path, stream=True)
+        == "/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse"
+    )
 
 
 async def test_invoke_without_tools_still_empty_tool_calls() -> None:
