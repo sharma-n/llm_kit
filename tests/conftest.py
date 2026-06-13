@@ -203,6 +203,85 @@ def tool_call_response(
     }
 
 
+def anthropic_tool_response(
+    *,
+    tool_calls: list[dict[str, Any]],
+    text: str | None = None,
+    model: str = "claude-test",
+    stop_reason: str = "tool_use",
+    input_tokens: int = 5,
+    output_tokens: int = 4,
+) -> dict[str, Any]:
+    """Anthropic Messages response carrying ``tool_use`` content blocks.
+
+    Each entry in ``tool_calls`` is ``{"id", "name", "input"}`` where ``input``
+    is the already-parsed dict Anthropic returns (not a JSON string).
+    """
+    content: list[dict[str, Any]] = []
+    if text is not None:
+        content.append({"type": "text", "text": text})
+    content.extend(
+        {
+            "type": "tool_use",
+            "id": tc["id"],
+            "name": tc["name"],
+            "input": tc["input"],
+        }
+        for tc in tool_calls
+    )
+    return {
+        "id": "msg_test",
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": content,
+        "stop_reason": stop_reason,
+        "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+    }
+
+
+def anthropic_sse(events: list[dict[str, Any]]) -> bytes:
+    """Serialize Anthropic-style events as a ``text/event-stream`` body.
+
+    Emits the realistic ``event: <type>`` / ``data: <json>`` line pair per event
+    (the decoder only reads ``data:`` lines, dispatching on the JSON ``type``).
+    """
+    parts = [f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events]
+    return "".join(parts).encode()
+
+
+def anthropic_text_stream(
+    text_pieces: list[str],
+    *,
+    model: str = "claude-test",
+    stop_reason: str = "end_turn",
+    input_tokens: int = 7,
+    output_tokens: int = 3,
+) -> bytes:
+    """A simple text-only Anthropic Messages SSE stream."""
+    events: list[dict[str, Any]] = [
+        {
+            "type": "message_start",
+            "message": {"model": model, "usage": {"input_tokens": input_tokens, "output_tokens": 1}},
+        },
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+    ]
+    events.extend(
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": piece}}
+        for piece in text_pieces
+    )
+    events.append({"type": "content_block_stop", "index": 0})
+    events.append(
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": stop_reason},
+            "usage": {"output_tokens": output_tokens},
+        }
+    )
+    events.append({"type": "message_stop"})
+    return anthropic_sse(events)
+
+
 def sse_bytes(chunks: list[dict[str, Any]], *, done: bool = True) -> bytes:
     """Serialize chunk dicts as an OpenAI-style ``text/event-stream`` body."""
     parts = [f"data: {json.dumps(c)}\n\n" for c in chunks]
@@ -357,6 +436,9 @@ def make_items(n: int, *, prefix: str = "id") -> list[BatchItem]:
 
 __all__ = [
     "FakeLLM",
+    "anthropic_sse",
+    "anthropic_text_stream",
+    "anthropic_tool_response",
     "app_config",
     "chat_response",
     "embedding_response",

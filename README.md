@@ -125,7 +125,7 @@ for call in resp.tool_calls:
 
 The same `tools=` argument works with `invoke_stream`; a `ToolCallStarted` event fires as soon as a call's name is known (a UI hint), and the assembled calls land on `StreamEnd.response.tool_calls`. See [examples/stream_invoke.py](examples/stream_invoke.py).
 
-> Streaming and tool parsing are implemented for the **OpenAI** wire format today; Anthropic and Gemini raise `NotImplementedError` if you request `tools`/streaming (a fast-follow). For a stateful agent built *on* this surface — memory, multi-turn, an MCP tool loop — see the `agent_kit` sibling project.
+> Streaming and tool parsing are implemented for the **OpenAI** and **Anthropic** wire formats; Gemini raises `NotImplementedError` if you request `tools`/streaming (a fast-follow). For a stateful agent built *on* this surface — memory, multi-turn, an MCP tool loop — see the `agent_kit` sibling project.
 
 ### Batch and embeddings
 

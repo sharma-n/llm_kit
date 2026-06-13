@@ -65,9 +65,11 @@ that test, not by raw capability gap.
   of `parse_response`. Scoped per the identity-fork rule below: **`llm_kit` parses
   tool calls; it does not execute them**, and streaming is **single-call only,
   never the batch path** (`retry_stream` retries only stream establishment).
-  Implemented for the OpenAI formatter; Anthropic/Gemini are a fast-follow
-  (they raise `NotImplementedError` on `tools`/`stream` today). This is the
-  deliberate fork toward the `agent_kit` sibling project (see SPEC.md).
+  Implemented for the OpenAI and Anthropic formatters; Gemini is the remaining
+  fast-follow (it raises `NotImplementedError` on `tools`/`stream` today, and its
+  streaming endpoint `:streamGenerateContent` needs a transport-level URL change
+  in `LLMClient`). This is the deliberate fork toward the `agent_kit` sibling
+  project (see SPEC.md).
 
 - **Provider formatters — Anthropic + Gemini.** `AnthropicFormatter` and
   `GeminiFormatter` in [`messages/formatter.py`](src/llm_kit/messages/formatter.py),

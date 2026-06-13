@@ -24,11 +24,27 @@ from llm_kit.messages.streaming import (
 from llm_kit.messages.tools import ToolDefinition
 from llm_kit.messages.types import Message
 
-from conftest import make_config, mock_client, openai_text_stream, sse_bytes, stream_mock_client
+from llm_kit.config.llm import MessageFormat
+
+from conftest import (
+    anthropic_sse,
+    anthropic_text_stream,
+    make_config,
+    mock_client,
+    openai_text_stream,
+    sse_bytes,
+    stream_mock_client,
+)
 
 
 def _make_llm(client: httpx.AsyncClient) -> LLMClient:
     return LLMClient(make_config(), client=client, owns_client=True)
+
+
+def _make_anthropic_llm(client: httpx.AsyncClient) -> LLMClient:
+    cfg = make_config()
+    cfg.llm.message_format = MessageFormat.ANTHROPIC
+    return LLMClient(cfg, client=client, owns_client=True)
 
 
 async def _collect(stream):
@@ -108,6 +124,75 @@ async def test_tool_call_fragments_reassembled() -> None:
     assert end.response.tool_calls[0].arguments == {"flight": "UA1"}
     assert end.response.finish_reason == "tool_calls"
     assert end.response.usage.total_tokens == 9
+
+
+# ----------------------------------------------------------- anthropic stream
+
+
+async def test_anthropic_text_stream_yields_chunks_then_end() -> None:
+    body = anthropic_text_stream(["Hel", "lo ", "world"], input_tokens=11, output_tokens=5)
+    llm = _make_anthropic_llm(stream_mock_client(body))
+    async with llm:
+        events = await _collect(llm.invoke_stream([Message.user("hi")]))
+
+    texts = [e.text for e in events if isinstance(e, TextChunk)]
+    assert texts == ["Hel", "lo ", "world"]
+
+    end = events[-1]
+    assert isinstance(end, StreamEnd)
+    assert end.response.text == "Hello world"
+    assert end.response.model == "claude-test"
+    assert end.response.finish_reason == "end_turn"
+    assert end.response.usage.total_tokens == 16
+
+
+async def test_anthropic_tool_call_stream_reassembled() -> None:
+    # tool_use block announced at content_block_start; args split across deltas.
+    events = [
+        {
+            "type": "message_start",
+            "message": {"model": "claude-test", "usage": {"input_tokens": 3, "output_tokens": 1}},
+        },
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "tool_use", "id": "toolu_1", "name": "book", "input": {}},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": '{"fli'},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": 'ght": "UA1"}'},
+        },
+        {"type": "content_block_stop", "index": 0},
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "tool_use"},
+            "usage": {"output_tokens": 6},
+        },
+        {"type": "message_stop"},
+    ]
+    llm = _make_anthropic_llm(stream_mock_client(anthropic_sse(events)))
+    async with llm:
+        collected = await _collect(
+            llm.invoke_stream([Message.user("book")], tools=[])
+        )
+
+    started = [e for e in collected if isinstance(e, ToolCallStarted)]
+    assert len(started) == 1
+    assert started[0].name == "book"
+    assert started[0].id == "toolu_1"
+
+    end = collected[-1]
+    assert isinstance(end, StreamEnd)
+    assert len(end.response.tool_calls) == 1
+    assert end.response.tool_calls[0].arguments == {"flight": "UA1"}
+    assert end.response.finish_reason == "tool_use"
+    assert end.response.usage.total_tokens == 9  # input 3 + output 6
 
 
 # --------------------------------------------------------------- response_model

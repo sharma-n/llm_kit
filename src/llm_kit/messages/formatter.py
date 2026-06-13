@@ -79,6 +79,28 @@ def _openai_tools_fields(
     return fields
 
 
+def _anthropic_tool_choice(
+    tool_choice: str | dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Map a provider-agnostic ``tool_choice`` onto Anthropic's shape.
+
+    Dicts pass through (the caller supplied an Anthropic-shaped choice). The
+    control words map to Anthropic's vocabulary; any other string is treated as
+    a specific tool name.
+    """
+    if tool_choice is None:
+        return None
+    if isinstance(tool_choice, dict):
+        return tool_choice
+    control = {
+        "auto": {"type": "auto"},
+        "required": {"type": "any"},
+        "any": {"type": "any"},
+        "none": {"type": "none"},
+    }
+    return control.get(tool_choice, {"type": "tool", "name": tool_choice})
+
+
 class OpenAIFormatter:
     """OpenAI chat-completions wire format (request + response)."""
 
@@ -365,13 +387,55 @@ class AnthropicFormatter:
 
         System text is hoisted to the top-level ``system`` field via
         ``system_prompt()``; including it here would be an API error.
+
+        Two tool-specific shapes differ from OpenAI:
+          - an assistant turn that called tools renders its ``tool_calls`` as
+            ``tool_use`` content blocks (``input`` is a dict, not a JSON string);
+          - a tool-result (``Role.TOOL``) turn becomes a ``tool_result`` block
+            inside a **user** message. Adjacent tool results are coalesced into a
+            single user turn, since Anthropic expects one user message to carry
+            all results for the preceding assistant's tool calls.
         """
         out: list[dict[str, Any]] = []
+        pending_results: list[dict[str, Any]] = []
+
+        def flush_results() -> None:
+            if pending_results:
+                out.append({"role": "user", "content": list(pending_results)})
+                pending_results.clear()
+
         for msg in messages:
             if msg.role is Role.SYSTEM:
                 continue
+            if msg.role is Role.TOOL:
+                pending_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": msg.tool_call_id or "",
+                        "content": msg.text or "",
+                    }
+                )
+                continue
+            flush_results()
             content = self._build_content(msg, encoded_images)
+            if msg.tool_calls:
+                blocks: list[dict[str, Any]] = (
+                    list(content)
+                    if isinstance(content, list)
+                    else ([{"type": "text", "text": content}] if content else [])
+                )
+                blocks.extend(
+                    {
+                        "type": "tool_use",
+                        "id": tc.id,
+                        "name": tc.name,
+                        "input": tc.arguments,
+                    }
+                    for tc in msg.tool_calls
+                )
+                content = blocks
             out.append({"role": str(msg.role), "content": content})
+        flush_results()
         return out
 
     def system_prompt(self, messages: list[Message]) -> str | None:
@@ -412,11 +476,6 @@ class AnthropicFormatter:
         tool_choice: str | dict[str, Any] | None = None,
         stream: bool = False,
     ) -> dict[str, Any]:
-        if tools or stream:
-            raise NotImplementedError(
-                "tool calling and streaming are implemented for the OpenAI "
-                "formatter only; Anthropic support is a fast-follow"
-            )
         body: dict[str, Any] = {"model": model, "messages": messages}
         if system is not None:
             body["system"] = system
@@ -428,6 +487,20 @@ class AnthropicFormatter:
             body["max_tokens"] = max_tokens
         body.update(extra_sampling)
         body.update(self.structured_output_fields(response_model))
+        if tools:
+            body["tools"] = [
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.parameters,
+                }
+                for t in tools
+            ]
+            choice = _anthropic_tool_choice(tool_choice)
+            if choice is not None:
+                body["tool_choice"] = choice
+        if stream:
+            body["stream"] = True
         return body
 
     # ----------------------------------------------------------------- response
@@ -445,16 +518,98 @@ class AnthropicFormatter:
         )
 
     def extract_tool_calls(self, data: dict[str, Any]) -> list[ToolCall]:
-        # Anthropic tool-call decoding is a fast-follow; not yet wired.
-        return []
+        content = data.get("content")
+        if not isinstance(content, list):
+            return []
+        out: list[ToolCall] = []
+        for i, block in enumerate(content):
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            out.append(
+                ToolCall(
+                    id=block.get("id") or f"call_{i}",
+                    name=block.get("name") or "",
+                    # Anthropic returns ``input`` already parsed as a dict.
+                    arguments=_parse_arguments(block.get("input")),
+                )
+            )
+        return out
 
     async def stream_events(
         self, lines: AsyncIterator[str]
     ) -> AsyncIterator[StreamFragment]:
-        raise NotImplementedError(
-            "streaming is implemented for the OpenAI formatter only"
-        )
-        yield  # pragma: no cover - makes this an async generator
+        """Decode an Anthropic Messages SSE stream into normalized fragments.
+
+        Anthropic emits typed events (``event:`` + ``data:`` line pairs); we
+        dispatch on the ``type`` field inside each ``data:`` JSON, so the
+        ``event:`` lines can be ignored. The shapes that matter:
+
+          - ``message_start``        — carries ``model`` and ``usage.input_tokens``
+          - ``content_block_start``  — a ``tool_use`` block announces its id + name
+          - ``content_block_delta``  — ``text_delta`` (text) or ``input_json_delta``
+            (a piece of the tool's argument JSON, grouped by the block ``index``)
+          - ``message_delta``        — ``stop_reason`` + final ``usage.output_tokens``
+          - ``message_stop``         — end of stream
+        """
+        input_tokens = 0
+        model_seen = False
+        async for line in lines:
+            line = line.strip()
+            if not line or not line.startswith("data:"):
+                continue
+            payload = line[len("data:") :].strip()
+            try:
+                event = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            etype = event.get("type")
+
+            if etype == "message_start":
+                message = event.get("message") or {}
+                model = message.get("model")
+                if model and not model_seen:
+                    model_seen = True
+                    yield MetaFragment(model=model)
+                usage = message.get("usage") or {}
+                input_tokens = int(usage.get("input_tokens", 0) or 0)
+
+            elif etype == "content_block_start":
+                block = event.get("content_block") or {}
+                if block.get("type") == "tool_use":
+                    yield ToolCallFragment(
+                        index=int(event.get("index", 0) or 0),
+                        id=block.get("id"),
+                        name=block.get("name"),
+                        args_delta="",
+                    )
+
+            elif etype == "content_block_delta":
+                delta = event.get("delta") or {}
+                dtype = delta.get("type")
+                if dtype == "text_delta":
+                    text = delta.get("text")
+                    if text:
+                        yield TextFragment(text=text)
+                elif dtype == "input_json_delta":
+                    yield ToolCallFragment(
+                        index=int(event.get("index", 0) or 0),
+                        args_delta=delta.get("partial_json") or "",
+                    )
+
+            elif etype == "message_delta":
+                usage = event.get("usage") or {}
+                output_tokens = int(usage.get("output_tokens", 0) or 0)
+                yield UsageFragment(
+                    prompt_tokens=input_tokens,
+                    completion_tokens=output_tokens,
+                    total_tokens=input_tokens + output_tokens,
+                )
+                reason = (event.get("delta") or {}).get("stop_reason")
+                if reason is not None:
+                    yield FinishFragment(reason=reason)
+
+            elif etype == "message_stop":
+                break
 
     def extract_usage(self, data: dict[str, Any]) -> tuple[int, int, int]:
         """Return ``(prompt_tokens, completion_tokens, total_tokens)``."""

@@ -18,7 +18,14 @@ from llm_kit.messages.formatter import (
 from llm_kit.messages.tools import ToolCall, ToolDefinition
 from llm_kit.messages.types import Message
 
-from conftest import make_config, mock_client, tool_call_response
+from llm_kit.config.llm import MessageFormat
+
+from conftest import (
+    anthropic_tool_response,
+    make_config,
+    mock_client,
+    tool_call_response,
+)
 
 WEATHER = ToolDefinition(
     name="get_weather",
@@ -29,6 +36,12 @@ WEATHER = ToolDefinition(
 
 def _make_llm(handler, **cfg) -> LLMClient:
     return LLMClient(make_config(**cfg), client=mock_client(handler), owns_client=True)
+
+
+def _make_anthropic_llm(handler) -> LLMClient:
+    cfg = make_config()
+    cfg.llm.message_format = MessageFormat.ANTHROPIC
+    return LLMClient(cfg, client=mock_client(handler), owns_client=True)
 
 
 async def test_invoke_with_tools_returns_parsed_tool_calls() -> None:
@@ -128,8 +141,8 @@ def test_message_tool_calls_render_to_openai_wire() -> None:
     assert wire[2] == {"role": "tool", "tool_call_id": "call_1", "content": "booked"}
 
 
-@pytest.mark.parametrize("fmt", [AnthropicFormatter(), GeminiFormatter()])
-def test_non_openai_tools_not_implemented(fmt) -> None:
+@pytest.mark.parametrize("fmt", [GeminiFormatter()])
+def test_gemini_tools_not_implemented(fmt) -> None:
     with pytest.raises(NotImplementedError):
         fmt.build_body(
             model="m",
@@ -142,6 +155,122 @@ def test_non_openai_tools_not_implemented(fmt) -> None:
             response_model=None,
             tools=[WEATHER],
         )
+
+
+# ----------------------------------------------------------------- anthropic
+
+
+async def test_anthropic_invoke_with_tools_returns_parsed_tool_calls() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=anthropic_tool_response(
+                tool_calls=[
+                    {"id": "toolu_1", "name": "get_weather", "input": {"city": "Paris"}}
+                ]
+            ),
+        )
+
+    llm = _make_anthropic_llm(handler)
+    async with llm:
+        resp = await llm.invoke([Message.user("weather?")], tools=[WEATHER])
+
+    assert resp.tool_calls == [
+        ToolCall(id="toolu_1", name="get_weather", arguments={"city": "Paris"})
+    ]
+    assert resp.finish_reason == "tool_use"
+
+
+async def test_anthropic_tools_rendered_into_request_body() -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content.decode()))
+        return httpx.Response(
+            200,
+            json=anthropic_tool_response(
+                tool_calls=[{"id": "t1", "name": "get_weather", "input": {}}]
+            ),
+        )
+
+    llm = _make_anthropic_llm(handler)
+    async with llm:
+        await llm.invoke([Message.user("hi")], tools=[WEATHER], tool_choice="required")
+
+    # Anthropic shape: flat name/description/input_schema, mapped tool_choice.
+    assert seen["tools"][0] == {
+        "name": "get_weather",
+        "description": "Look up the weather",
+        "input_schema": WEATHER.parameters,
+    }
+    assert seen["tool_choice"] == {"type": "any"}
+
+
+def test_anthropic_message_tool_calls_render_to_wire() -> None:
+    fmt = AnthropicFormatter()
+    msgs = [
+        Message.user("book it"),
+        Message.assistant_tool_calls(
+            [ToolCall(id="toolu_1", name="book", arguments={"flight": "UA1"})],
+            text="on it",
+        ),
+        Message.tool_result("toolu_1", "booked"),
+    ]
+    wire = fmt.format_messages(msgs, {})
+
+    # Assistant turn: text block + tool_use block (input is a dict).
+    assert wire[1]["role"] == "assistant"
+    assert wire[1]["content"][0] == {"type": "text", "text": "on it"}
+    assert wire[1]["content"][1] == {
+        "type": "tool_use",
+        "id": "toolu_1",
+        "name": "book",
+        "input": {"flight": "UA1"},
+    }
+    # Tool result becomes a user message carrying a tool_result block.
+    assert wire[2] == {
+        "role": "user",
+        "content": [
+            {"type": "tool_result", "tool_use_id": "toolu_1", "content": "booked"}
+        ],
+    }
+
+
+def test_anthropic_coalesces_adjacent_tool_results() -> None:
+    fmt = AnthropicFormatter()
+    msgs = [
+        Message.assistant_tool_calls(
+            [
+                ToolCall(id="a", name="f", arguments={}),
+                ToolCall(id="b", name="g", arguments={}),
+            ]
+        ),
+        Message.tool_result("a", "ra"),
+        Message.tool_result("b", "rb"),
+    ]
+    wire = fmt.format_messages(msgs, {})
+
+    # The two tool results collapse into ONE user turn (Anthropic requirement).
+    assert len(wire) == 2
+    assert wire[1]["role"] == "user"
+    assert [b["tool_use_id"] for b in wire[1]["content"]] == ["a", "b"]
+
+
+def test_anthropic_tool_choice_specific_tool_name() -> None:
+    fmt = AnthropicFormatter()
+    body = fmt.build_body(
+        model="m",
+        messages=[],
+        system=None,
+        temperature=None,
+        top_p=None,
+        max_tokens=None,
+        extra_sampling={},
+        response_model=None,
+        tools=[WEATHER],
+        tool_choice="get_weather",
+    )
+    assert body["tool_choice"] == {"type": "tool", "name": "get_weather"}
 
 
 async def test_invoke_without_tools_still_empty_tool_calls() -> None:
