@@ -57,6 +57,26 @@ def _data_url_to_anthropic_image(data_url: str) -> dict[str, Any] | None:
     }
 
 
+def _enforce_no_additional_properties(schema: dict[str, Any]) -> dict[str, Any]:
+    """Recursively add ``additionalProperties: false`` to every object in a JSON schema.
+
+    Anthropic's structured-output API rejects schemas where any object type
+    omits this field; Pydantic's ``model_json_schema()`` does not set it.
+    """
+    schema = dict(schema)
+    if schema.get("type") == "object" and "additionalProperties" not in schema:
+        schema["additionalProperties"] = False
+    for key in ("properties", "$defs", "definitions"):
+        if isinstance(schema.get(key), dict):
+            schema[key] = {k: _enforce_no_additional_properties(v) for k, v in schema[key].items()}
+    if isinstance(schema.get("items"), dict):
+        schema["items"] = _enforce_no_additional_properties(schema["items"])
+    for key in ("anyOf", "oneOf", "allOf"):
+        if isinstance(schema.get(key), list):
+            schema[key] = [_enforce_no_additional_properties(s) for s in schema[key]]
+    return schema
+
+
 class AnthropicFormatter:
     """Anthropic Messages API wire format (request + response)."""
 
@@ -134,7 +154,7 @@ class AnthropicFormatter:
             "output_config": {
                 "format": {
                     "type": "json_schema",
-                    "schema": model.model_json_schema(),
+                    "schema": _enforce_no_additional_properties(model.model_json_schema()),
                 }
             }
         }

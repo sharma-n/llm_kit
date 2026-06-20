@@ -3,13 +3,13 @@
 # ${VAR:-default} supplies a fallback.
 
 llm:
-  base_url: ${LLM_BASE_URL:-https://api.openai.com}
-  chat_completions_path: /v1/chat/completions
-  model: ${LLM_MODEL:-gpt-4o-mini}
-  api_key_env: OPENAI_API_KEY
+  base_url: ${LLM_BASE_URL:-https://api.anthropic.com}
+  chat_completions_path: /v1/messages
+  model: ${LLM_MODEL:-claude-haiku-4-5-20251001}
+  api_key_env: ANTHROPIC_API_KEY
+  message_format: anthropic
   temperature: 0.2
   max_tokens: 1024
-  structured_output_style: openai_json_schema
   extra_headers: {}
 
 embed:

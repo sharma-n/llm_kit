@@ -23,6 +23,33 @@ from llm_kit.messages.tools import ToolCall, ToolDefinition
 from llm_kit.messages.types import Message, Role
 
 
+def _strictify_schema(node: Any) -> Any:
+    """Make a Pydantic JSON schema satisfy OpenAI strict structured output.
+
+    OpenAI ``strict: true`` requires every ``object`` to set
+    ``additionalProperties: false`` *and* list every property key in
+    ``required`` — Pydantic's ``model_json_schema()`` does neither. We walk the
+    schema (including ``$defs``, array ``items``, and ``anyOf``/``allOf``/
+    ``oneOf`` combinators) and patch each object node in place. Returns ``node``
+    so callers can wrap it inline.
+    """
+    if isinstance(node, dict):
+        if node.get("type") == "object" and "properties" in node:
+            node["additionalProperties"] = False
+            node["required"] = list(node["properties"].keys())
+        for key in ("properties", "$defs", "definitions"):
+            section = node.get(key)
+            if isinstance(section, dict):
+                for sub in section.values():
+                    _strictify_schema(sub)
+        for key in ("items", "additionalProperties", "anyOf", "allOf", "oneOf", "prefixItems"):
+            _strictify_schema(node.get(key))
+    elif isinstance(node, list):
+        for item in node:
+            _strictify_schema(item)
+    return node
+
+
 def _openai_tools_fields(
     tools: list[ToolDefinition] | None,
     tool_choice: str | dict[str, Any] | None,
@@ -113,7 +140,7 @@ class OpenAIFormatter:
                     "type": "json_schema",
                     "json_schema": {
                         "name": model.__name__,
-                        "schema": model.model_json_schema(),
+                        "schema": _strictify_schema(model.model_json_schema()),
                         "strict": True,
                     },
                 }

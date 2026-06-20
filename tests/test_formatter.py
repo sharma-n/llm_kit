@@ -77,7 +77,28 @@ def test_structured_output_json_schema_style() -> None:
     assert rf["type"] == "json_schema"
     assert rf["json_schema"]["name"] == "_Foo"
     assert rf["json_schema"]["strict"] is True
-    assert "properties" in rf["json_schema"]["schema"]
+    schema = rf["json_schema"]["schema"]
+    assert "properties" in schema
+    # OpenAI strict mode requires these on every object, which Pydantic omits.
+    assert schema["additionalProperties"] is False
+    assert sorted(schema["required"]) == ["count", "name"]
+
+
+def test_structured_output_strict_patches_nested_objects() -> None:
+    class _Inner(BaseModel):
+        x: int
+
+    class _Outer(BaseModel):
+        inner: _Inner
+        tags: list[_Inner]
+
+    fields = _fmt(StructuredOutputStyle.OPENAI_JSON_SCHEMA).structured_output_fields(_Outer)
+    schema = fields["response_format"]["json_schema"]["schema"]
+    assert schema["additionalProperties"] is False
+    # Nested model definitions live under $defs and must be patched too.
+    inner = schema["$defs"]["_Inner"]
+    assert inner["additionalProperties"] is False
+    assert inner["required"] == ["x"]
 
 
 def test_structured_output_tool_use_style() -> None:
@@ -191,9 +212,25 @@ def test_anthropic_structured_output_fields() -> None:
     fields = _afmt().structured_output_fields(_Foo)
     fmt = fields["output_config"]["format"]
     assert fmt["type"] == "json_schema"
-    assert "properties" in fmt["schema"]
+    schema = fmt["schema"]
+    assert "properties" in schema
+    assert schema["additionalProperties"] is False
     assert "tools" not in fields
     assert "tool_choice" not in fields
+
+
+def test_anthropic_structured_output_patches_nested_objects() -> None:
+    class _Inner(BaseModel):
+        x: int
+
+    class _Outer(BaseModel):
+        inner: _Inner
+
+    fields = _afmt().structured_output_fields(_Outer)
+    schema = fields["output_config"]["format"]["schema"]
+    assert schema["additionalProperties"] is False
+    inner = schema["$defs"]["_Inner"]
+    assert inner["additionalProperties"] is False
 
 
 def test_anthropic_structured_output_no_model_returns_empty_dict() -> None:

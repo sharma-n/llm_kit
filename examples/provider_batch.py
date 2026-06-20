@@ -30,6 +30,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from llm_kit import BatchItem, BatchJob, LLMClient, Message
+from llm_kit.batch.jsonl import write_results_to_jsonl
 
 CONFIG_PATH = Path(__file__).with_name("config.yaml")
 HANDLE_PATH = Path(__file__).with_name("batch_job.json")
@@ -84,17 +85,22 @@ async def fetch() -> None:
     """Phase 3: download + reconcile into jsonl (re-supplying items for validation)."""
     job = BatchJob.load(HANDLE_PATH)
     items = make_items()
-    written = ok = 0
-    async with LLMClient.from_yaml(str(CONFIG_PATH)) as llm:
-        with OUTPUT_PATH.open("w", encoding="utf-8") as _:  # truncate for the demo
-            pass
-        async for result in llm.fetch_batch_results(job, items=items):
-            written += 1
+    ok = 0
+
+    async def _print_and_yield(results):
+        nonlocal ok
+        async for result in results:
             if result.ok:
                 ok += 1
                 print(f"{result.id}: {result.response.parsed}")
             else:
                 print(f"{result.id} failed: {result.error}")
+            yield result
+
+    async with LLMClient.from_yaml(str(CONFIG_PATH)) as llm:
+        OUTPUT_PATH.unlink(missing_ok=True)  # truncate for the demo
+        raw = llm.fetch_batch_results(job, items=items)  # type: ignore[attr-defined]
+        written = await write_results_to_jsonl(OUTPUT_PATH, _print_and_yield(raw))
     print(f"reconciled {ok}/{written} results")
 
 
