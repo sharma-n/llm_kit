@@ -64,8 +64,10 @@ def _enforce_no_additional_properties(schema: dict[str, Any]) -> dict[str, Any]:
     omits this field; Pydantic's ``model_json_schema()`` does not set it.
     """
     schema = dict(schema)
-    if schema.get("type") == "object" and "additionalProperties" not in schema:
-        schema["additionalProperties"] = False
+    if schema.get("type") == "object":
+        ap = schema.get("additionalProperties")
+        if ap is None or isinstance(ap, dict):
+            schema["additionalProperties"] = False
     for key in ("properties", "$defs", "definitions"):
         if isinstance(schema.get(key), dict):
             schema[key] = {k: _enforce_no_additional_properties(v) for k, v in schema[key].items()}

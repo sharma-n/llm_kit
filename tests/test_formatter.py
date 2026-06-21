@@ -108,6 +108,18 @@ def test_structured_output_tool_use_style() -> None:
     assert fields["tool_choice"]["function"]["name"] == "_Foo"
 
 
+def test_structured_output_dict_field_additionalproperties_false() -> None:
+    """dict[str, str] fields must not produce additionalProperties as a schema object."""
+
+    class _Facts(BaseModel):
+        facts: dict[str, str]
+
+    fields = _fmt(StructuredOutputStyle.OPENAI_JSON_SCHEMA).structured_output_fields(_Facts)
+    schema = fields["response_format"]["json_schema"]["schema"]
+    ap = schema["properties"]["facts"].get("additionalProperties")
+    assert ap is False, f"expected False, got {ap!r}"
+
+
 def test_structured_output_none_style_returns_empty_dict() -> None:
     assert _fmt(StructuredOutputStyle.NONE).structured_output_fields(_Foo) == {}
 
@@ -231,6 +243,18 @@ def test_anthropic_structured_output_patches_nested_objects() -> None:
     assert schema["additionalProperties"] is False
     inner = schema["$defs"]["_Inner"]
     assert inner["additionalProperties"] is False
+
+
+def test_anthropic_structured_output_dict_field_additionalproperties_false() -> None:
+    """dict[str, str] fields must not produce additionalProperties as a schema object."""
+
+    class _Facts(BaseModel):
+        facts: dict[str, str]
+
+    fields = _afmt().structured_output_fields(_Facts)
+    schema = fields["output_config"]["format"]["schema"]
+    ap = schema["properties"]["facts"].get("additionalProperties")
+    assert ap is False, f"expected False, got {ap!r}"
 
 
 def test_anthropic_structured_output_no_model_returns_empty_dict() -> None:

@@ -34,9 +34,12 @@ def _strictify_schema(node: Any) -> Any:
     so callers can wrap it inline.
     """
     if isinstance(node, dict):
-        if node.get("type") == "object" and "properties" in node:
-            node["additionalProperties"] = False
-            node["required"] = list(node["properties"].keys())
+        if node.get("type") == "object":
+            if "properties" in node:
+                node["additionalProperties"] = False
+                node["required"] = list(node["properties"].keys())
+            elif isinstance(node.get("additionalProperties"), dict):
+                node["additionalProperties"] = False
         for key in ("properties", "$defs", "definitions"):
             section = node.get(key)
             if isinstance(section, dict):
