@@ -211,6 +211,7 @@ class AnthropicFormatter:
                 body["tool_choice"] = choice
         if stream:
             body["stream"] = True
+        body["cache_control"] = {"type": "ephemeral"}
         return body
 
     # ----------------------------------------------------------------- response
