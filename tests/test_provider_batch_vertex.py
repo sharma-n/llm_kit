@@ -343,6 +343,52 @@ async def test_row_error_missing_row_and_unmatched(caplog: pytest.LogCaptureFixt
     assert any("could not be matched" in r.message for r in caplog.records)
 
 
+def _final_name(storage: FakeStorage) -> str:
+    return next(n for n in storage.objects if n.endswith("/predictions.jsonl"))
+
+
+async def test_final_and_incremental_files_yield_each_item_once() -> None:
+    cfg, storage, genai, backend = setup()
+    res = await backend.submit(reqs("a", "b", "c"))
+    status = await backend.poll(res.batch_id)
+    final = _final_name(storage)
+    base = final.rsplit("/", 1)[0]
+    storage.objects[
+        f"{base}/incremental_predictions/predictions-chunked-2026-11-20T11:45:50.004844Z.jsonl"
+    ] = storage.objects[final]
+    out = [r async for r in backend.fetch_results(status)]
+    assert sorted(r.custom_id for r in out) == ["a", "b", "c"]
+    assert all(r.error is None for r in out)
+
+
+async def test_incremental_only_falls_back() -> None:
+    cfg, storage, genai, backend = setup()
+    res = await backend.submit(reqs("a", "b"))
+    status = await backend.poll(res.batch_id)
+    final = _final_name(storage)
+    base = final.rsplit("/", 1)[0]
+    storage.objects[f"{base}/incremental_predictions/predictions-chunked-1.jsonl"] = storage.objects.pop(final)
+    out = [r async for r in backend.fetch_results(status)]
+    assert sorted(r.custom_id for r in out) == ["a", "b"]
+    assert all(r.error is None for r in out)
+
+
+@pytest.mark.parametrize("echo_labels", [True, False])
+async def test_duplicate_rows_in_one_file_yield_once(
+    echo_labels: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    cfg, storage, genai, backend = setup(echo_labels=echo_labels)
+    res = await backend.submit(reqs("a", "b"))
+    status = await backend.poll(res.batch_id)
+    final = _final_name(storage)
+    storage.objects[final] += storage.objects[final]  # every row twice
+    with caplog.at_level(logging.WARNING):
+        out = [r async for r in backend.fetch_results(status)]
+    assert sorted(r.custom_id for r in out) == ["a", "b"]
+    assert all(r.error is None for r in out)
+    assert not any("could not be matched" in r.message for r in caplog.records)
+
+
 async def test_failed_job_is_terminal_via_run_batch_api(tmp_path) -> None:
     cfg, storage, genai, backend = setup(
         final_state="JOB_STATE_FAILED",

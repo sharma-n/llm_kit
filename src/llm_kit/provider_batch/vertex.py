@@ -9,10 +9,19 @@ invariant #10). This module is only transport + envelope:
              ``batchPredictionJobs`` job is created via ``google-genai``
              (``client.aio.batches.create``) with ``dest`` = ``<run>/output/``.
   - poll:    ``client.aio.batches.get``; ``JobState`` -> ``BatchState``.
-  - fetch:   list ``<run>/output/`` and stream every ``predictions*.jsonl`` line by
-             line. Vertex rows carry no custom id, so each row is matched to its
-             request by (1) the ``llm_kit_id`` request *label* if the service echoed
-             it, else (2) the canonical hash of the echoed ``request``.
+  - fetch:   list ``<run>/output/`` and stream the *final* ``predictions*.jsonl``
+             files line by line. Vertex rows carry no custom id, so each row is
+             matched to its request by (1) the ``llm_kit_id`` request *label* if the
+             service echoed it, else (2) the canonical hash of the echoed
+             ``request``. A custom id is yielded at most once.
+
+Output layout (observed on a real run): Vertex writes
+``output/prediction-model-<ts>/predictions.jsonl`` (final) *and*
+``output/prediction-model-<ts>/incremental_predictions/predictions-chunked-<ts>.jsonl``
+(progress chunks that repeat rows of the final file). Reading both would yield
+every item twice, so only files outside ``incremental_predictions/`` are read. The
+incremental chunks are a fallback used only when no final file exists (e.g. partial
+output of a failed/cancelled job fetched with ``allow_partial``).
   - cancel / cleanup: SDK cancel; ``cleanup`` deletes uploaded input / images / output.
 
 SDK exception to invariant #1: this backend does **not** use the shared
@@ -58,6 +67,8 @@ LABEL_KEY = "llm_kit_id"
 _INPUT_NAME = "input.jsonl"
 _KEYS_NAME = "keys.jsonl"
 _OUTPUT_DIR = "output/"
+_INCREMENTAL_DIR = "incremental_predictions"
+_DUPLICATE: Any = object()  # sentinel: row of an already-yielded request
 _IMAGES_DIR = "images/"
 _LINES_PER_HOP = 64  # lines read per thread hop when streaming a blob
 
@@ -363,7 +374,7 @@ class VertexBatchBackend:
             by_hash[k["hash"]].append(k["id"])
         remaining = set(id_hash)
 
-        blobs = await asyncio.to_thread(
+        candidates = await asyncio.to_thread(
             lambda: sorted(
                 (
                     b
@@ -374,6 +385,9 @@ class VertexBatchBackend:
                 key=lambda b: b.name,
             )
         )
+        final = [b for b in candidates if f"/{_INCREMENTAL_DIR}/" not in b.name]
+        # Incremental chunks only when no final file exists (partial output).
+        blobs = final or candidates
         unmatched = 0
         for blob in blobs:
             async for line in self._iter_lines(blob):
@@ -389,6 +403,9 @@ class VertexBatchBackend:
                 if cid is None:
                     unmatched += 1
                     logger.warning("could not match an output row in %s to any request; skipped", blob.name)
+                    continue
+                if cid is _DUPLICATE or cid not in remaining:
+                    logger.debug("duplicate output row in %s; skipped", blob.name)
                     continue
                 remaining.discard(cid)
                 err = _row_error(row)
@@ -411,13 +428,17 @@ class VertexBatchBackend:
         id_hash: dict[str, str],
         by_hash: dict[str, deque[str]],
         remaining: set[str],
-    ) -> str | None:
+    ) -> Any:
+        """Custom id for ``row``; ``_DUPLICATE`` for a row of an already-yielded
+        request; ``None`` if it matches no request at all."""
         request = row.get("request")
         if not isinstance(request, dict):
             return None
         labels = request.get("labels")
         cid = decode_label(labels.get(LABEL_KEY)) if isinstance(labels, dict) else None
-        if cid is not None and cid in remaining:
+        if cid is not None and cid in id_hash:
+            if cid not in remaining:
+                return _DUPLICATE  # already yielded; never reassign by hash
             bucket = by_hash.get(id_hash[cid])
             if bucket is not None and cid in bucket:
                 bucket.remove(cid)
@@ -427,7 +448,7 @@ class VertexBatchBackend:
             cand = bucket.popleft()
             if cand in remaining:
                 return cand
-        return None
+        return _DUPLICATE if bucket is not None else None
 
     # ------------------------------------------------------------ cancel/cleanup
 

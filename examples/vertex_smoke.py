@@ -99,24 +99,36 @@ async def main() -> None:
     if status.error_detail:
         print("job error:", status.error_detail)
 
-    # Findings probe: are labels echoed in the raw output rows?
+    # Findings probe (diagnostics only): inspect every .jsonl under output/.
     backend = llm._batch_backend
-    echoed = None
     try:
-        from itertools import islice
-
         run_prefix = job.extra["run_prefix"]
         bucket_name, path = run_prefix[5:].split("/", 1)
-        for blob in backend._storage_client().list_blobs(bucket_name, prefix=path + "output/"):
-            if blob.name.endswith(".jsonl"):
-                with blob.open("rb") as fh:
-                    for line in islice(fh, 5):
-                        row = json.loads(line)
-                        labels = (row.get("request") or {}).get("labels") or {}
-                        echoed = decode_label(labels.get(LABEL_KEY)) is not None
-                        print(f"first row keys={sorted(row)} labels_echoed={echoed} line_bytes={len(line)}")
-                        break
-                break
+        out_prefix = path + "output/"
+        for blob in backend._storage_client().list_blobs(bucket_name, prefix=out_prefix):
+            if not blob.name.endswith(".jsonl"):
+                continue
+            rows = 0
+            first: dict | None = None
+            max_line = 0
+            with blob.open("rb") as fh:
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    rows += 1
+                    max_line = max(max_line, len(line))
+                    if first is None:
+                        first = json.loads(line)
+            rel = blob.name[len(out_prefix) :]
+            if first is None:
+                print(f"{rel}: rows=0 (empty)")
+                continue
+            labels = (first.get("request") or {}).get("labels") or {}
+            decoded = decode_label(labels.get(LABEL_KEY))
+            print(
+                f"{rel}: rows={rows} first_row_keys={sorted(first)} "
+                f"label_echoed={decoded is not None} decoded={decoded!r} max_line_bytes={max_line}"
+            )
     except Exception as exc:  # noqa: BLE001 - diagnostics only
         print("label probe failed:", exc)
 
