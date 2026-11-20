@@ -7,12 +7,12 @@ Two ways to process many prompts: a **live** concurrent pipeline that your proce
 ## Live pipeline — three sinks
 
 ```python
-from llm_kit import BatchItem, Message
+from llm_kit import BatchItem, ImagePart, Message
 
 items = [
     BatchItem(
         id=f"item-{i:06d}",
-        messages=[Message.user(f"Caption:", image_urls=["https://..."])],
+        messages=[Message.user("Caption:", ImagePart.from_url("https://..."))],
         response_model=Sentiment,    # per-item schemas are supported
     )
     for i in range(1_000_000)

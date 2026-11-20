@@ -32,7 +32,7 @@ from llm_kit.llm.response import BatchItem, BatchResult, BatchSummary, LLMRespon
 from llm_kit.llm.streaming import StreamAssembler, StreamEnd, StreamEvent
 from llm_kit.messages.formatter import AnthropicFormatter, GeminiFormatter, OpenAIFormatter
 from llm_kit.messages.tools import ToolDefinition
-from llm_kit.messages.types import Message
+from llm_kit.messages.types import ImagePart, Message
 from llm_kit.provider_batch.driver import build_backend, reconcile, serialize_items
 from llm_kit.provider_batch.job import BatchJob
 from llm_kit.provider_batch.types import BatchJobStatus
@@ -337,8 +337,8 @@ class LLMClient(BaseLLM):
         ``tool_choice`` / ``stream`` default to off, so the batch serializer
         (which omits them) is unaffected.
         """
-        encoded = await self._images.fetch_many(
-            [u for m in messages for u in m.image_urls]
+        encoded = await self._images.resolve(
+            [p for m in messages for p in m.parts if isinstance(p, ImagePart)]
         )
         return self._build_body(
             messages,
@@ -353,7 +353,7 @@ class LLMClient(BaseLLM):
     def _build_body(
         self,
         messages: list[Message],
-        encoded_images: dict[str, str],
+        encoded_images: dict[ImagePart, str],
         response_model: type[BaseModel] | None,
         overrides: dict[str, Any] | None,
         *,

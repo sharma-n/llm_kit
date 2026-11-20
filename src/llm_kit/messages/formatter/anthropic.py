@@ -9,7 +9,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from llm_kit.errors import ProviderError
-from llm_kit.messages.formatter._shared import parse_arguments
+from llm_kit.messages.formatter._shared import message_text, parse_arguments
 from llm_kit.messages.streaming import (
     FinishFragment,
     MetaFragment,
@@ -19,7 +19,7 @@ from llm_kit.messages.streaming import (
     UsageFragment,
 )
 from llm_kit.messages.tools import ToolCall, ToolDefinition
-from llm_kit.messages.types import Message, Role
+from llm_kit.messages.types import ImagePart, Message, Role, TextPart
 
 
 def _anthropic_tool_choice(
@@ -87,7 +87,7 @@ class AnthropicFormatter:
     def format_messages(
         self,
         messages: list[Message],
-        encoded_images: dict[str, str],
+        encoded_images: dict[ImagePart, str],
     ) -> list[dict[str, Any]]:
         """Build the ``messages`` array, excluding system messages.
 
@@ -118,7 +118,7 @@ class AnthropicFormatter:
                     {
                         "type": "tool_result",
                         "tool_use_id": msg.tool_call_id or "",
-                        "content": msg.text or "",
+                        "content": message_text(msg),
                     }
                 )
                 continue
@@ -145,7 +145,7 @@ class AnthropicFormatter:
         return out
 
     def system_prompt(self, messages: list[Message]) -> str | None:
-        texts = [msg.text or "" for msg in messages if msg.role is Role.SYSTEM]
+        texts = [message_text(msg) for msg in messages if msg.role is Role.SYSTEM]
         return "\n\n".join(texts) if texts else None
 
     def structured_output_fields(self, model: type[BaseModel] | None) -> dict[str, Any]:
@@ -337,18 +337,19 @@ class AnthropicFormatter:
     def _build_content(
         self,
         msg: Message,
-        encoded_images: dict[str, str],
+        encoded_images: dict[ImagePart, str],
     ) -> str | list[dict[str, Any]]:
-        if not msg.image_urls:
-            return msg.text or ""
-        parts: list[dict[str, Any]] = []
-        if msg.text:
-            parts.append({"type": "text", "text": msg.text})
-        for url in msg.image_urls:
-            data_url = encoded_images.get(url)
+        if all(isinstance(p, TextPart) for p in msg.parts) and len(msg.parts) <= 1:
+            return msg.parts[0].text if msg.parts else ""  # type: ignore[union-attr]
+        blocks: list[dict[str, Any]] = []
+        for part in msg.parts:
+            if isinstance(part, TextPart):
+                blocks.append({"type": "text", "text": part.text})
+                continue
+            data_url = encoded_images.get(part)
             if data_url is None:
                 continue
-            image_part = _data_url_to_anthropic_image(data_url)
-            if image_part is not None:
-                parts.append(image_part)
-        return parts
+            image_block = _data_url_to_anthropic_image(data_url)
+            if image_block is not None:
+                blocks.append(image_block)
+        return blocks

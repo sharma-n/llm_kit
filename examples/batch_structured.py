@@ -13,7 +13,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from llm_kit import BatchItem, Message, LLMClient
+from llm_kit import BatchItem, ImagePart, Message, LLMClient
 
 
 class ImageCaption(BaseModel):
@@ -31,7 +31,7 @@ def make_items() -> list[BatchItem]:
             id=f"cap-{i:04d}",
             messages=[
                 Message.system("Caption the image and report whether it contains text."),
-                Message.user("Caption this:", image_urls=[url]),
+                Message.user("Caption this:", ImagePart.from_url(url)),
             ],
             response_model=ImageCaption,
         )

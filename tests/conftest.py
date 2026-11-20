@@ -21,7 +21,7 @@ from llm_kit.config.rate_limit import RateLimitConfig
 from llm_kit.llm.base import BaseLLM
 from llm_kit.llm.client import LLMClient
 from llm_kit.llm.response import BatchItem, BatchResult, LLMResponse, TokenUsage
-from llm_kit.messages.types import Message
+from llm_kit.messages.types import Message, TextPart
 
 
 def make_config(**overrides: Any) -> AppConfig:
@@ -412,6 +412,11 @@ def stream_mock_client(body: bytes, *, status: int = 200) -> httpx.AsyncClient:
     return mock_client(handler)
 
 
+def _text(msg: Message) -> str:
+    """Joined text parts of a message (test helper)."""
+    return "".join(p.text for p in msg.parts if isinstance(p, TextPart))
+
+
 class FakeLLM(BaseLLM):
     """Drop-in BaseLLM for batch-driver tests. No HTTP, no httpx, deterministic."""
 
@@ -427,7 +432,7 @@ class FakeLLM(BaseLLM):
         self._config = config or make_config()
         self._fail_ids = fail_ids or set()
         self._delay = delay_seconds
-        self._responder = responder or (lambda msgs: f"echo: {msgs[-1].text or ''}")
+        self._responder = responder or (lambda msgs: f"echo: {_text(msgs[-1])}")
         self._stream_script = stream_script
         self.invoke_calls: list[list[Message]] = []
         self.stream_calls: list[list[Message]] = []
@@ -446,7 +451,7 @@ class FakeLLM(BaseLLM):
         if self._delay:
             await asyncio.sleep(self._delay)
         # Treat last user text after "id=" as the item id (set by tests)
-        text = (messages[-1].text or "")
+        text = _text(messages[-1])
         for fid in list(self.fail_now):
             if fid in text:
                 from llm_kit.errors import ProviderError

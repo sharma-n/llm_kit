@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from llm_kit.config.llm import StructuredOutputStyle
 from llm_kit.errors import ProviderError
-from llm_kit.messages.formatter._shared import parse_arguments
+from llm_kit.messages.formatter._shared import message_text, parse_arguments
 from llm_kit.messages.streaming import (
     FinishFragment,
     MetaFragment,
@@ -20,7 +20,7 @@ from llm_kit.messages.streaming import (
     UsageFragment,
 )
 from llm_kit.messages.tools import ToolCall, ToolDefinition
-from llm_kit.messages.types import Message, Role
+from llm_kit.messages.types import ImagePart, Message, Role, TextPart
 
 
 def _strictify_schema(node: Any) -> Any:
@@ -89,13 +89,14 @@ class OpenAIFormatter:
     def format_messages(
         self,
         messages: list[Message],
-        encoded_images: dict[str, str],
+        encoded_images: dict[ImagePart, str],
     ) -> list[dict[str, Any]]:
         """Build the ``messages`` array.
 
-        ``encoded_images`` maps original URL → ``"data:image/...;base64,..."``.
-        URLs absent from the map are skipped (the fetcher's failure policy already
-        decided what to do; we honour whatever it produced).
+        ``encoded_images`` maps each ``ImagePart`` → ``"data:image/...;base64,..."``.
+        Parts absent from the map are skipped (the image failure policy already
+        decided what to do; we honour whatever it produced). Parts are emitted
+        in the order given, one block per part.
         """
         out: list[dict[str, Any]] = []
         for msg in messages:
@@ -104,7 +105,7 @@ class OpenAIFormatter:
                     {
                         "role": "tool",
                         "tool_call_id": msg.tool_call_id or "",
-                        "content": msg.text or "",
+                        "content": message_text(msg),
                     }
                 )
                 continue
@@ -337,18 +338,19 @@ class OpenAIFormatter:
     def _build_content(
         self,
         msg: Message,
-        encoded_images: dict[str, str],
+        encoded_images: dict[ImagePart, str],
     ) -> str | list[dict[str, Any]]:
-        # Text-only messages use the simple string form — smaller payload, and
-        # some providers reject content-arrays for system messages.
-        if not msg.image_urls:
-            return msg.text or ""
-        parts: list[dict[str, Any]] = []
-        if msg.text:
-            parts.append({"type": "text", "text": msg.text})
-        for url in msg.image_urls:
-            data_url = encoded_images.get(url)
+        # A lone text part (or none) uses the simple string form — smaller
+        # payload, and some providers reject content-arrays for system messages.
+        if all(isinstance(p, TextPart) for p in msg.parts) and len(msg.parts) <= 1:
+            return msg.parts[0].text if msg.parts else ""  # type: ignore[union-attr]
+        blocks: list[dict[str, Any]] = []
+        for part in msg.parts:
+            if isinstance(part, TextPart):
+                blocks.append({"type": "text", "text": part.text})
+                continue
+            data_url = encoded_images.get(part)
             if data_url is None:
                 continue
-            parts.append({"type": "image_url", "image_url": {"url": data_url}})
-        return parts
+            blocks.append({"type": "image_url", "image_url": {"url": data_url}})
+        return blocks

@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import logging
+import re
 from collections import OrderedDict
 
 import httpx
@@ -17,6 +19,7 @@ import httpx
 from llm_kit.config.image import ImageConfig, ImageFailurePolicy
 from llm_kit.errors import ImageFetchError, LLMError
 from llm_kit.http.retry import retry_request
+from llm_kit.messages.types import ImagePart
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +29,9 @@ _PLACEHOLDER_DATA_URL = (
     "data:image/png;base64,"
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
 )
+
+
+_DATA_URL_RE = re.compile(r"^data:([^;,]+)((?:;[^;,]*)*);base64,(.*)$", re.DOTALL)
 
 
 class ImageFetcher:
@@ -42,6 +48,60 @@ class ImageFetcher:
         self._semaphore = asyncio.Semaphore(config.max_concurrent_downloads)
         self._cache: OrderedDict[str, str] = OrderedDict()
         self._cache_lock = asyncio.Lock()
+
+    async def resolve(self, parts: list[ImagePart]) -> dict[ImagePart, str]:
+        """Resolve image parts to data URLs, keyed by the part itself.
+
+        - bytes parts: base64-encoded once (off-loop when large); never fetched
+          or cached;
+        - ``data:`` URL parts: validated and passed through; no network, not cached;
+        - other URLs: fetched via ``fetch_many`` (LRU-cached).
+
+        Failures (fetch errors *and* malformed data URLs) follow
+        ``ImageConfig.on_failure``: omitted (SKIP), placeholder, or raised.
+        """
+        out: dict[ImagePart, str] = {}
+        fetch_urls: list[str] = []
+        for part in dict.fromkeys(parts):
+            if part.data is not None:
+                assert part.mime_type is not None
+                out[part] = await self._encode(part.data, part.mime_type)
+            elif part.url is not None and part.url.startswith("data:"):
+                try:
+                    out[part] = await self._check_data_url(part.url)
+                except ImageFetchError as exc:
+                    out.update(
+                        {part: v for v in self._handle_failure(part.url, exc).values()}
+                    )
+            elif part.url is not None:
+                fetch_urls.append(part.url)
+        if fetch_urls:
+            fetched = await self.fetch_many(fetch_urls)
+            for part in parts:
+                if part.url in fetched:
+                    out[part] = fetched[part.url]
+        return out
+
+    async def _check_data_url(self, url: str) -> str:
+        m = _DATA_URL_RE.match(url)
+        if m is None:
+            raise ImageFetchError(
+                "malformed image data URL (expected data:<mime>;base64,<payload>)",
+                url=_truncate(url),
+            )
+        payload = m.group(3)
+        try:
+            if len(payload) >= self._config.threadpool_encode_threshold_bytes:
+                await asyncio.to_thread(base64.b64decode, payload, validate=True)
+            else:
+                base64.b64decode(payload, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ImageFetchError(
+                f"image data URL is not valid base64: {exc}",
+                url=_truncate(url),
+                cause=exc,
+            ) from exc
+        return url
 
     async def fetch_many(self, urls: list[str]) -> dict[str, str]:
         """Resolve a batch of URLs in parallel.

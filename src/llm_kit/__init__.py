@@ -25,7 +25,7 @@ from llm_kit.llm.response import (
     ToolDefinition,
 )
 from llm_kit.llm.streaming import StreamEnd, StreamEvent, TextChunk, ToolCallStarted
-from llm_kit.messages.types import Message
+from llm_kit.messages.types import ImagePart, Message, Part, TextPart
 from llm_kit.provider_batch.job import BatchJob
 from llm_kit.provider_batch.types import BatchJobStatus, BatchState
 
@@ -45,7 +45,10 @@ __all__ = [
     "ImageFetchError",
     "LLMError",
     "LLMResponse",
+    "ImagePart",
     "Message",
+    "Part",
+    "TextPart",
     "NetworkError",
     "LLMClient",
     "OpenAICompatibleEmbedder",

@@ -8,7 +8,7 @@ import time
 import pytest
 
 from llm_kit.config.rate_limit import RateLimitConfig
-from llm_kit.messages.types import Message
+from llm_kit.messages.types import ImagePart, Message
 from llm_kit.rate_limit.limiter import RateLimiter, TokenBucket
 
 
@@ -83,7 +83,7 @@ def test_default_token_estimator_uses_chars_per_token() -> None:
 def test_default_token_estimator_charges_for_images() -> None:
     limiter = RateLimiter(RateLimitConfig(default_chars_per_token=4.0))
     est_text = limiter.estimate_tokens([Message.user("hi")])
-    est_with_image = limiter.estimate_tokens([Message.user("hi", image_urls=["http://x"])])
+    est_with_image = limiter.estimate_tokens([Message.user("hi", ImagePart.from_url("http://x"))])
     assert est_with_image > est_text + 100  # images add a chunky baseline
 
 

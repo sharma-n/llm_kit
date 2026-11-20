@@ -9,7 +9,7 @@ Bring your own endpoint — OpenAI, Anthropic, Google Gemini, or anything else t
 Most LLM client libraries assume one provider, one model, and synchronous calls. When you're building agentic systems or running large multimodal batches, you usually need:
 
 - **Provider freedom** — swap OpenAI for vLLM / Together / Anthropic / a local Ollama instance with a config change, not a code change.
-- **Multimodal by default** — every message can carry zero, one, or many image URLs, and they should be fetched, encoded, and inlined transparently.
+- **Multimodal by default** — every message is an ordered list of text and image parts (URLs, `data:` URLs, or raw bytes); images are fetched/encoded and inlined transparently, preserving order.
 - **Real throughput** — async, persistent HTTPS connections, RPM and TPM rate limits respected, hundreds of concurrent requests.
 - **Big batches without OOM** — run a million prompts through and stream results to disk as they complete.
 
@@ -32,7 +32,7 @@ The package is `llm_kit`.
 
 ```python
 import asyncio
-from llm_kit import Message, LLMClient
+from llm_kit import ImagePart, Message, LLMClient
 
 async def main():
     async with LLMClient.from_yaml("examples/config.yaml") as llm:
@@ -50,15 +50,17 @@ Set `OPENAI_API_KEY` (or whichever env var your config points at) and run with `
 
 ### Single request with images
 
-Any URL goes in `image_urls`; `llm_kit` fetches and base64-encodes it before sending.
+Messages are ordered lists of text and image parts (`Message.user` turns `str` arguments into `TextPart`s). An `ImagePart` is a URL (fetched and base64-encoded before sending), a `data:` URL (passed through), or raw bytes (`ImagePart.from_bytes(data, "image/png")`, encoded once, never fetched). Order is preserved on the wire.
 
 ```python
 response = await llm.invoke([
     Message.system("Describe the image in one sentence."),
-    Message.user("Caption this:", image_urls=[
-        "https://example.com/cat.jpg",
-        "https://example.com/dog.png",
-    ]),
+    Message.user(
+        "Caption this:",
+        ImagePart.from_url("https://example.com/cat.jpg"),
+        "and compare it with:",
+        ImagePart.from_url("https://example.com/dog.png"),
+    ),
 ])
 ```
 
