@@ -435,6 +435,7 @@ class FakeLLM(BaseLLM):
         self._responder = responder or (lambda msgs: f"echo: {_text(msgs[-1])}")
         self._stream_script = stream_script
         self.invoke_calls: list[list[Message]] = []
+        self.invoke_kwargs: list[dict[str, Any]] = []
         self.stream_calls: list[list[Message]] = []
         self.fail_now: set[str] = set(self._fail_ids)
 
@@ -442,12 +443,16 @@ class FakeLLM(BaseLLM):
         self,
         messages: list[Message],
         *,
-        response_model: type | None = None,
+        response_model: Any = None,
+        settings: Any = None,
         overrides: dict[str, Any] | None = None,
     ) -> LLMResponse:
         import asyncio
 
         self.invoke_calls.append(messages)
+        self.invoke_kwargs.append(
+            {"response_model": response_model, "settings": settings, "overrides": overrides}
+        )
         if self._delay:
             await asyncio.sleep(self._delay)
         # Treat last user text after "id=" as the item id (set by tests)
@@ -466,7 +471,8 @@ class FakeLLM(BaseLLM):
         self,
         messages: list[Message],
         *,
-        response_model: type | None = None,
+        response_model: Any = None,
+        settings: Any = None,
         overrides: dict[str, Any] | None = None,
         tools: Any = None,
         tool_choice: Any = None,

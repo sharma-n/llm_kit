@@ -11,14 +11,13 @@ import asyncio
 import json
 import logging
 import os
+import copy
 import time
 from collections.abc import AsyncIterable, AsyncIterator
 from pathlib import Path
 from typing import Any, Self
 
 import httpx
-from pydantic import BaseModel
-
 from llm_kit.batch.processor import run_batch_stream
 from llm_kit.config.app import AppConfig
 from llm_kit.config.llm import MessageFormat
@@ -31,6 +30,8 @@ from llm_kit.llm.parsing import parse_response
 from llm_kit.llm.response import BatchItem, BatchResult, BatchSummary, LLMResponse
 from llm_kit.llm.streaming import StreamAssembler, StreamEnd, StreamEvent
 from llm_kit.messages.formatter import AnthropicFormatter, GeminiFormatter, OpenAIFormatter
+from llm_kit.messages.schema import ResponseSchema
+from llm_kit.messages.settings import RequestSettings
 from llm_kit.messages.tools import ToolDefinition
 from llm_kit.messages.types import ImagePart, Message
 from llm_kit.provider_batch.driver import build_backend, reconcile, serialize_items
@@ -92,13 +93,19 @@ class LLMClient(BaseLLM):
         self,
         messages: list[Message],
         *,
-        response_model: type[BaseModel] | None = None,
+        response_model: ResponseSchema | None = None,
+        settings: RequestSettings | None = None,
         overrides: dict[str, Any] | None = None,
         tools: list[ToolDefinition] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
         body = await self._build_request_body(
-            messages, response_model, overrides, tools=tools, tool_choice=tool_choice
+            messages,
+            response_model=response_model,
+            settings=settings,
+            overrides=overrides,
+            tools=tools,
+            tool_choice=tool_choice,
         )
 
         estimated = self._limiter.estimate_tokens(messages)
@@ -129,7 +136,8 @@ class LLMClient(BaseLLM):
         self,
         messages: list[Message],
         *,
-        response_model: type[BaseModel] | None = None,
+        response_model: ResponseSchema | None = None,
+        settings: RequestSettings | None = None,
         overrides: dict[str, Any] | None = None,
         tools: list[ToolDefinition] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
@@ -144,7 +152,13 @@ class LLMClient(BaseLLM):
         Retries cover establishing the stream; a mid-stream failure propagates.
         """
         body = await self._build_request_body(
-            messages, response_model, overrides, tools=tools, tool_choice=tool_choice, stream=True
+            messages,
+            response_model=response_model,
+            settings=settings,
+            overrides=overrides,
+            tools=tools,
+            tool_choice=tool_choice,
+            stream=True,
         )
 
         estimated = self._limiter.estimate_tokens(messages)
@@ -199,7 +213,7 @@ class LLMClient(BaseLLM):
         llm_cfg = self._config.llm
         summary.estimated_cost = (
             summary.prompt_tokens / 1_000_000 * llm_cfg.prompt_cost_per_1m_tokens
-            + summary.completion_tokens / 1_000_000 * llm_cfg.completion_cost_per_1m_tokens
+            + summary.output_tokens / 1_000_000 * llm_cfg.completion_cost_per_1m_tokens
         )
         return summary
 
@@ -209,9 +223,10 @@ class LLMClient(BaseLLM):
         """Serialize ``items`` and submit them to the provider's batch endpoint.
 
         Returns a ``BatchJob`` handle. Call ``handle.save(path)`` to persist it
-        for cross-process resume — the manifest carries each item's metadata, but
-        ``response_model`` (a Python type) is not persisted, so cross-process
-        result validation requires re-supplying ``items`` to ``fetch_batch_results``.
+        for cross-process resume — the manifest carries each item's metadata and
+        any dict ``response_model`` (JSON schema). A Pydantic class is a Python
+        type and is not persisted, so validating against one in a fresh process
+        requires re-supplying ``items`` to ``fetch_batch_results``.
         """
         cfg = self._config.provider_batch
         requests, manifest = await serialize_items(
@@ -233,14 +248,13 @@ class LLMClient(BaseLLM):
     ) -> AsyncIterator[BatchResult]:
         """Download and reconcile results for ``job`` into ``BatchResult``s.
 
-        ``response_model`` validation is applied only for ids present in
-        ``items``; otherwise results come back as raw text. Metadata is always
-        restored from the job manifest.
+        ``response_model`` validation uses ``items`` where supplied; for ids not in
+        ``items``, a dict schema persisted in the job manifest is used. Otherwise
+        (Pydantic class, no items) results come back as raw text. Metadata is
+        always restored from the job manifest.
         """
         status = await self._batch_backend.poll(job.batch_id)
-        response_models = (
-            {it.id: it.response_model for it in items} if items else {}
-        )
+        response_models = self._response_models_for(job, items)
         metadata = {cid: job.metadata_for(cid) for cid in job.manifest}
         raw = self._batch_backend.fetch_results(status)
         async for result in reconcile(
@@ -282,13 +296,27 @@ class LLMClient(BaseLLM):
         completed = load_completed_ids(path) if path.exists() else set()
         if completed:
             logger.info("resuming: %d items already in %s", len(completed), path)
-        response_models = {it.id: it.response_model for it in items}
+        response_models = self._response_models_for(job, items)
         metadata = {cid: job.metadata_for(cid) for cid in job.manifest}
         raw = self._batch_backend.fetch_results(status)
         results = reconcile(
             raw, self._formatter, response_models=response_models, metadata=metadata
         )
         return await write_results_to_jsonl(path, _skip_completed(results, completed))
+
+    @staticmethod
+    def _response_models_for(
+        job: BatchJob, items: list[BatchItem] | None
+    ) -> dict[str, ResponseSchema | None]:
+        """Per-id schemas: those persisted in the manifest, overridden by ``items``."""
+        models: dict[str, ResponseSchema | None] = {
+            cid: schema
+            for cid in job.manifest
+            if (schema := job.response_schema_for(cid)) is not None
+        }
+        for it in items or []:
+            models[it.id] = it.response_model
+        return models
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -323,9 +351,10 @@ class LLMClient(BaseLLM):
     async def _build_request_body(
         self,
         messages: list[Message],
-        response_model: type[BaseModel] | None,
-        overrides: dict[str, Any] | None,
         *,
+        response_model: ResponseSchema | None = None,
+        settings: RequestSettings | None = None,
+        overrides: dict[str, Any] | None = None,
         tools: list[ToolDefinition] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         stream: bool = False,
@@ -335,7 +364,8 @@ class LLMClient(BaseLLM):
         Shared by the live ``invoke`` path and the provider-batch serializer so
         both produce byte-identical request bodies for the same item. ``tools`` /
         ``tool_choice`` / ``stream`` default to off, so the batch serializer
-        (which omits them) is unaffected.
+        (which omits them) is unaffected. Keyword-only so the batch driver can
+        pass per-item fields by name.
         """
         encoded = await self._images.resolve(
             [p for m in messages for p in m.parts if isinstance(p, ImagePart)]
@@ -343,8 +373,9 @@ class LLMClient(BaseLLM):
         return self._build_body(
             messages,
             encoded,
-            response_model,
-            overrides,
+            response_model=response_model,
+            settings=settings,
+            overrides=overrides,
             tools=tools,
             tool_choice=tool_choice,
             stream=stream,
@@ -354,29 +385,35 @@ class LLMClient(BaseLLM):
         self,
         messages: list[Message],
         encoded_images: dict[ImagePart, str],
-        response_model: type[BaseModel] | None,
-        overrides: dict[str, Any] | None,
         *,
+        response_model: ResponseSchema | None = None,
+        settings: RequestSettings | None = None,
+        overrides: dict[str, Any] | None = None,
         tools: list[ToolDefinition] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         stream: bool = False,
     ) -> dict[str, Any]:
+        """Precedence: ``LLMConfig`` < ``settings`` < ``overrides`` (deep-merged)."""
         cfg = self._config.llm
+        s = settings or RequestSettings()
         body = self._formatter.build_body(
             model=cfg.model,
             messages=self._formatter.format_messages(messages, encoded_images),
             system=self._formatter.system_prompt(messages),
-            temperature=cfg.temperature,
-            top_p=cfg.top_p,
-            max_tokens=cfg.max_tokens,
+            temperature=_first_set(s.temperature, cfg.temperature),
+            top_p=_first_set(s.top_p, cfg.top_p),
+            max_tokens=_first_set(s.max_tokens, cfg.max_tokens),
             extra_sampling=cfg.extra_sampling,
             response_model=response_model,
+            reasoning=s.reasoning,
             tools=tools,
             tool_choice=tool_choice,
             stream=stream,
         )
         if overrides:
-            body.update(overrides)
+            # Copy first: the formatter may alias caller/config dicts (tool_choice,
+            # extra_sampling values), and the merge mutates nested dicts.
+            body = _deep_merge(copy.deepcopy(body), overrides)
         return body
 
     def _parse_json(self, response: httpx.Response) -> dict[str, Any]:
@@ -391,6 +428,21 @@ class LLMClient(BaseLLM):
         if not isinstance(data, dict):
             raise ProviderError(f"unexpected response shape: {type(data).__name__}")
         return data
+
+
+def _first_set(preferred: Any, fallback: Any) -> Any:
+    return fallback if preferred is None else preferred
+
+
+def _deep_merge(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    """Merge ``overrides`` into ``base`` in place: dicts recurse, anything else
+    (lists included) replaces. Override values are copied, never aliased."""
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _deep_merge(base[key], value)
+        else:
+            base[key] = copy.deepcopy(value)
+    return base
 
 
 __all__ = ["AuthError", "LLMClient", "LLMError"]

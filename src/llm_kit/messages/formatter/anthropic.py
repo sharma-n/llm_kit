@@ -6,10 +6,10 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
-from pydantic import BaseModel
-
 from llm_kit.errors import ProviderError
-from llm_kit.messages.formatter._shared import message_text, parse_arguments
+from llm_kit.messages.formatter._shared import message_text, parse_arguments, resolve_budget
+from llm_kit.messages.schema import ResponseSchema, json_schema
+from llm_kit.messages.settings import Reasoning
 from llm_kit.messages.streaming import (
     FinishFragment,
     MetaFragment,
@@ -148,7 +148,7 @@ class AnthropicFormatter:
         texts = [message_text(msg) for msg in messages if msg.role is Role.SYSTEM]
         return "\n\n".join(texts) if texts else None
 
-    def structured_output_fields(self, model: type[BaseModel] | None) -> dict[str, Any]:
+    def structured_output_fields(self, model: ResponseSchema | None) -> dict[str, Any]:
         """Return top-level body fields for structured output using output_config.format."""
         if model is None:
             return {}
@@ -156,7 +156,7 @@ class AnthropicFormatter:
             "output_config": {
                 "format": {
                     "type": "json_schema",
-                    "schema": _enforce_no_additional_properties(model.model_json_schema()),
+                    "schema": _enforce_no_additional_properties(json_schema(model)),
                 }
             }
         }
@@ -181,7 +181,8 @@ class AnthropicFormatter:
         top_p: float | None,
         max_tokens: int | None,
         extra_sampling: dict[str, Any],
-        response_model: type[BaseModel] | None,
+        response_model: ResponseSchema | None,
+        reasoning: Reasoning | None = None,
         tools: list[ToolDefinition] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         stream: bool = False,
@@ -196,6 +197,11 @@ class AnthropicFormatter:
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
         body.update(extra_sampling)
+        budget = resolve_budget(reasoning)
+        if budget is not None:
+            # Provider-side validation (min budget, temperature, max_tokens >
+            # budget) is deliberately left to Anthropic.
+            body["thinking"] = {"type": "enabled", "budget_tokens": budget}
         body.update(self.structured_output_fields(response_model))
         if tools:
             body["tools"] = [
@@ -222,6 +228,7 @@ class AnthropicFormatter:
             raise ProviderError(
                 f"missing or unexpected 'content' in Anthropic response: {data!r}"
             )
+        # Only ``text`` blocks: ``thinking`` / ``redacted_thinking`` are skipped.
         return "".join(
             block.get("text", "")
             for block in content
@@ -301,6 +308,7 @@ class AnthropicFormatter:
                     text = delta.get("text")
                     if text:
                         yield TextFragment(text=text)
+                # ``thinking_delta`` / ``signature_delta`` are deliberately ignored.
                 elif dtype == "input_json_delta":
                     yield ToolCallFragment(
                         index=int(event.get("index", 0) or 0),
@@ -322,12 +330,16 @@ class AnthropicFormatter:
             elif etype == "message_stop":
                 break
 
-    def extract_usage(self, data: dict[str, Any]) -> tuple[int, int, int]:
-        """Return ``(prompt_tokens, completion_tokens, total_tokens)``."""
+    def extract_usage(self, data: dict[str, Any]) -> tuple[int, int, int, int]:
+        """Return ``(prompt, completion, total, reasoning)``.
+
+        Anthropic bills thinking inside ``output_tokens`` and does not report it
+        separately, so ``reasoning`` is always 0 (the total still includes it).
+        """
         usage = data.get("usage") or {}
         prompt = int(usage.get("input_tokens", 0) or 0)
         completion = int(usage.get("output_tokens", 0) or 0)
-        return prompt, completion, prompt + completion
+        return prompt, completion, prompt + completion, 0
 
     def finish_reason(self, data: dict[str, Any]) -> str | None:
         return data.get("stop_reason")

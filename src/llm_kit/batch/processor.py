@@ -117,6 +117,7 @@ async def _process_item(llm: BaseLLM, item: BatchItem) -> BatchResult:
         response = await llm.invoke(
             item.messages,
             response_model=item.response_model,
+            settings=item.settings,
             overrides=item.overrides or None,
         )
     except LLMError as err:

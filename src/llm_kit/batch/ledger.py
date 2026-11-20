@@ -24,6 +24,8 @@ class UsageLedger:
         self._prompt_tokens = 0
         self._completion_tokens = 0
         self._total_tokens = 0
+        self._reasoning_tokens = 0
+        self._output_tokens = 0
 
     def add(self, result: BatchResult) -> None:
         """Accumulate one result's token usage."""
@@ -35,6 +37,8 @@ class UsageLedger:
                 self._prompt_tokens += u.prompt_tokens
                 self._completion_tokens += u.completion_tokens
                 self._total_tokens += u.total_tokens
+                self._reasoning_tokens += u.reasoning_tokens
+                self._output_tokens += u.output_tokens
         else:
             self._error_count += 1
 
@@ -47,7 +51,7 @@ class UsageLedger:
         """Return a BatchSummary, computing estimated_cost from configured prices."""
         cost = (
             self._prompt_tokens / 1_000_000 * prompt_cost_per_1m
-            + self._completion_tokens / 1_000_000 * completion_cost_per_1m
+            + self._output_tokens / 1_000_000 * completion_cost_per_1m
         )
         return BatchSummary(
             total_items=self._total_items,
@@ -56,5 +60,7 @@ class UsageLedger:
             prompt_tokens=self._prompt_tokens,
             completion_tokens=self._completion_tokens,
             total_tokens=self._total_tokens,
+            reasoning_tokens=self._reasoning_tokens,
+            output_tokens=self._output_tokens,
             estimated_cost=cost,
         )

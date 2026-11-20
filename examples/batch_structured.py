@@ -1,7 +1,9 @@
 """Batch example: each item validates against its own pydantic schema.
 
 Demonstrates:
-- per-item ``response_model`` for structured outputs
+- per-item ``response_model`` for structured outputs (a pydantic class, or a
+  plain JSON schema dict whose ``parsed`` is decoded, unvalidated JSON)
+- per-item ``settings`` (temperature / reasoning) inside one batch
 - multimodal input (image URL → base64 transparently)
 - streaming results to a jsonl file with ID-based resume
 """
@@ -13,12 +15,21 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from llm_kit import BatchItem, ImagePart, Message, LLMClient
+from llm_kit import BatchItem, ImagePart, Message, LLMClient, Reasoning, ReasoningEffort, RequestSettings
 
 
 class ImageCaption(BaseModel):
     caption: str = Field(description="A one-sentence caption.")
     contains_text: bool
+
+
+# A JSON schema dict works anywhere a pydantic class does.
+CAPTION_SCHEMA = {
+    "title": "ImageCaption",
+    "type": "object",
+    "properties": {"caption": {"type": "string"}, "contains_text": {"type": "boolean"}},
+    "required": ["caption", "contains_text"],
+}
 
 
 def make_items() -> list[BatchItem]:
@@ -33,7 +44,14 @@ def make_items() -> list[BatchItem]:
                 Message.system("Caption the image and report whether it contains text."),
                 Message.user("Caption this:", ImagePart.from_url(url)),
             ],
-            response_model=ImageCaption,
+            # Even items use the pydantic class; odd items the schema dict and
+            # a different sampling/reasoning setting.
+            response_model=ImageCaption if i % 2 == 0 else CAPTION_SCHEMA,
+            settings=None
+            if i % 2 == 0
+            else RequestSettings(
+                temperature=0.0, reasoning=Reasoning(effort=ReasoningEffort.LOW)
+            ),
         )
         for i, url in enumerate(image_urls)
     ]

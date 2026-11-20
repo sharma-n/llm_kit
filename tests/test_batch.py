@@ -129,7 +129,7 @@ async def test_unexpected_exception_inside_invoke_is_captured() -> None:
     """A non-LLMError exception must not crash the pipeline; it becomes an error result."""
 
     class ExplodingLLM(FakeLLM):
-        async def invoke(self, messages, *, response_model=None, overrides=None):
+        async def invoke(self, messages, *, response_model=None, settings=None, overrides=None):
             raise RuntimeError("programming bug")
 
     llm = ExplodingLLM()

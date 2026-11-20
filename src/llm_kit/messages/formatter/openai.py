@@ -6,11 +6,11 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
-from pydantic import BaseModel
-
 from llm_kit.config.llm import StructuredOutputStyle
 from llm_kit.errors import ProviderError
-from llm_kit.messages.formatter._shared import message_text, parse_arguments
+from llm_kit.messages.formatter._shared import message_text, parse_arguments, resolve_effort
+from llm_kit.messages.schema import ResponseSchema, json_schema, schema_name
+from llm_kit.messages.settings import Reasoning
 from llm_kit.messages.streaming import (
     FinishFragment,
     MetaFragment,
@@ -78,6 +78,16 @@ def _openai_tools_fields(
     return fields
 
 
+def _openai_usage(usage: Any) -> tuple[int, int, int, int]:
+    usage = usage or {}
+    prompt = int(usage.get("prompt_tokens", 0) or 0)
+    completion = int(usage.get("completion_tokens", 0) or 0)
+    total = int(usage.get("total_tokens", 0) or 0)
+    details = usage.get("completion_tokens_details") or {}
+    reasoning = int(details.get("reasoning_tokens", 0) or 0)
+    return prompt, completion, total, reasoning
+
+
 class OpenAIFormatter:
     """OpenAI chat-completions wire format (request + response)."""
 
@@ -134,7 +144,7 @@ class OpenAIFormatter:
         # OpenAI embeds system as a regular message; nothing to lift out.
         return None
 
-    def structured_output_fields(self, model: type[BaseModel] | None) -> dict[str, Any]:
+    def structured_output_fields(self, model: ResponseSchema | None) -> dict[str, Any]:
         """Return top-level body fields to merge for structured output (empty dict if none)."""
         if model is None or self._style is StructuredOutputStyle.NONE:
             return {}
@@ -143,8 +153,8 @@ class OpenAIFormatter:
                 "response_format": {
                     "type": "json_schema",
                     "json_schema": {
-                        "name": model.__name__,
-                        "schema": _strictify_schema(model.model_json_schema()),
+                        "name": schema_name(model),
+                        "schema": _strictify_schema(json_schema(model)),
                         "strict": True,
                     },
                 }
@@ -155,14 +165,14 @@ class OpenAIFormatter:
                     {
                         "type": "function",
                         "function": {
-                            "name": model.__name__,
-                            "parameters": model.model_json_schema(),
+                            "name": schema_name(model),
+                            "parameters": json_schema(model),
                         },
                     }
                 ],
                 "tool_choice": {
                     "type": "function",
-                    "function": {"name": model.__name__},
+                    "function": {"name": schema_name(model)},
                 },
             }
         raise ValueError(f"Unknown structured output style: {self._style}")
@@ -186,7 +196,8 @@ class OpenAIFormatter:
         top_p: float | None,
         max_tokens: int | None,
         extra_sampling: dict[str, Any],
-        response_model: type[BaseModel] | None,
+        response_model: ResponseSchema | None,
+        reasoning: Reasoning | None = None,
         tools: list[ToolDefinition] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         stream: bool = False,
@@ -200,6 +211,9 @@ class OpenAIFormatter:
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
         body.update(extra_sampling)
+        effort = resolve_effort(reasoning)
+        if effort is not None:
+            body["reasoning_effort"] = effort.value
         body.update(self.structured_output_fields(response_model))
         # Explicit tools override any tool_use structured-output fields above.
         body.update(_openai_tools_fields(tools, tool_choice))
@@ -238,13 +252,13 @@ class OpenAIFormatter:
             return "".join(p.get("text", "") for p in content if isinstance(p, dict))
         return content if content is not None else ""
 
-    def extract_usage(self, data: dict[str, Any]) -> tuple[int, int, int]:
-        """Return ``(prompt_tokens, completion_tokens, total_tokens)``."""
-        usage = data.get("usage") or {}
-        prompt = int(usage.get("prompt_tokens", 0) or 0)
-        completion = int(usage.get("completion_tokens", 0) or 0)
-        total = int(usage.get("total_tokens", 0) or 0)
-        return prompt, completion, total
+    def extract_usage(self, data: dict[str, Any]) -> tuple[int, int, int, int]:
+        """Return ``(prompt, completion, total, reasoning)`` token counts.
+
+        OpenAI's ``completion_tokens`` and ``total_tokens`` already include the
+        reasoning tokens reported under ``completion_tokens_details``.
+        """
+        return _openai_usage(data.get("usage"))
 
     def finish_reason(self, data: dict[str, Any]) -> str | None:
         try:
@@ -303,10 +317,12 @@ class OpenAIFormatter:
 
             usage = chunk.get("usage")
             if usage:
+                prompt, completion, total, reasoning = _openai_usage(usage)
                 yield UsageFragment(
-                    prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
-                    completion_tokens=int(usage.get("completion_tokens", 0) or 0),
-                    total_tokens=int(usage.get("total_tokens", 0) or 0),
+                    prompt_tokens=prompt,
+                    completion_tokens=completion,
+                    total_tokens=total,
+                    reasoning_tokens=reasoning,
                 )
 
             choices = chunk.get("choices") or []

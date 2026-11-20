@@ -25,6 +25,8 @@ from llm_kit.llm.response import (
     ToolDefinition,
 )
 from llm_kit.llm.streaming import StreamEnd, StreamEvent, TextChunk, ToolCallStarted
+from llm_kit.messages.schema import ResponseSchema
+from llm_kit.messages.settings import Reasoning, ReasoningEffort, RequestSettings
 from llm_kit.messages.types import ImagePart, Message, Part, TextPart
 from llm_kit.provider_batch.job import BatchJob
 from llm_kit.provider_batch.types import BatchJobStatus, BatchState
@@ -53,6 +55,10 @@ __all__ = [
     "LLMClient",
     "OpenAICompatibleEmbedder",
     "ProviderError",
+    "Reasoning",
+    "ReasoningEffort",
+    "RequestSettings",
+    "ResponseSchema",
     "StreamEnd",
     "StreamEvent",
     "TextChunk",

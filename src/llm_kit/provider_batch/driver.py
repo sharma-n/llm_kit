@@ -10,17 +10,18 @@ handling mirrors ``_process_item`` in the live processor.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any
+import copy
+from collections.abc import AsyncIterator, Awaitable
+from typing import Any, Protocol
 
 import httpx
-from pydantic import BaseModel
-
 from llm_kit.config.app import AppConfig
 from llm_kit.config.llm import MessageFormat
 from llm_kit.errors import LLMError
 from llm_kit.llm.parsing import ResponseParser, parse_response
 from llm_kit.llm.response import BatchItem, BatchResult
+from llm_kit.messages.schema import ResponseSchema
+from llm_kit.messages.settings import RequestSettings
 from llm_kit.messages.types import Message
 from llm_kit.provider_batch.anthropic import AnthropicBatchBackend
 from llm_kit.provider_batch.backend import BatchBackend
@@ -28,9 +29,17 @@ from llm_kit.provider_batch.gemini import GeminiBatchBackend
 from llm_kit.provider_batch.openai import OpenAIBatchBackend
 from llm_kit.provider_batch.types import BatchJobStatus, BatchRequest, RawResult
 
-BodyBuilder = Callable[
-    [list[Message], type[BaseModel] | None, dict[str, Any] | None], Awaitable[dict[str, Any]]
-]
+class BodyBuilder(Protocol):
+    """Keyword-based so per-item fields (settings, schema) flow by name."""
+
+    def __call__(
+        self,
+        messages: list[Message],
+        *,
+        response_model: ResponseSchema | None = None,
+        settings: RequestSettings | None = None,
+        overrides: dict[str, Any] | None = None,
+    ) -> Awaitable[dict[str, Any]]: ...
 
 
 def build_backend(
@@ -63,10 +72,18 @@ async def serialize_items(
     manifest: dict[str, dict[str, Any]] = {}
     for item in items:
         body = await build_request_body(
-            item.messages, item.response_model, item.overrides or None
+            item.messages,
+            response_model=item.response_model,
+            settings=item.settings,
+            overrides=item.overrides or None,
         )
         requests.append(BatchRequest(custom_id=item.id, body=body))
-        manifest[item.id] = {"metadata": dict(item.metadata)}
+        entry: dict[str, Any] = {"metadata": dict(item.metadata)}
+        if isinstance(item.response_model, dict):
+            # JSON-serialisable, so persist it: a fresh process can validate
+            # (decode) results without re-supplying the items.
+            entry["response_schema"] = copy.deepcopy(item.response_model)
+        manifest[item.id] = entry
     if len(requests) > max_requests:
         raise ValueError(
             f"batch of {len(requests)} requests exceeds max_requests_per_batch={max_requests}"
@@ -78,7 +95,7 @@ async def reconcile(
     raw_results: AsyncIterator[RawResult],
     formatter: ResponseParser,
     *,
-    response_models: dict[str, type[BaseModel] | None],
+    response_models: dict[str, ResponseSchema | None],
     metadata: dict[str, dict[str, Any]],
 ) -> AsyncIterator[BatchResult]:
     """Turn raw downloaded results into ``BatchResult``s (out-of-order safe)."""

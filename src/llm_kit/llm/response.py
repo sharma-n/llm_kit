@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from pydantic import BaseModel
-
 from llm_kit.errors import LLMError
+from llm_kit.messages.schema import ResponseSchema
+from llm_kit.messages.settings import RequestSettings
 from llm_kit.messages.tools import ToolCall, ToolDefinition
 from llm_kit.messages.types import Message
 
@@ -27,6 +27,22 @@ class TokenUsage:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    # Thinking tokens, when the provider reports them. ``total_tokens`` always
+    # includes them. OpenAI already counts them inside ``completion_tokens``;
+    # Gemini reports them outside ``candidatesTokenCount`` (so outside
+    # ``completion_tokens``); Anthropic does not report them separately (0).
+    reasoning_tokens: int = 0
+
+    @property
+    def output_tokens(self) -> int:
+        """Billable output tokens (thinking included, never double counted).
+
+        ``total - prompt`` is right for every provider: OpenAI total =
+        prompt + completion (completion already holds reasoning); Anthropic
+        total = prompt + output; Gemini total = prompt + candidates + thoughts.
+        ``max`` guards a provider that omits ``total_tokens``.
+        """
+        return max(self.completion_tokens, self.total_tokens - self.prompt_tokens)
 
 
 @dataclass(slots=True)
@@ -34,7 +50,8 @@ class LLMResponse:
     """One successful LLM invocation."""
 
     text: str
-    parsed: BaseModel | None = None
+    # BaseModel for a Pydantic response_model; decoded JSON (dict/list/...) for a dict schema.
+    parsed: Any = None
     usage: TokenUsage = field(default_factory=TokenUsage)
     model: str | None = None
     finish_reason: str | None = None
@@ -48,13 +65,15 @@ class BatchItem:
     """One unit of work for the batch driver.
 
     ``response_model`` overrides whatever the caller passed to ``invoke`` — each
-    item can validate against its own schema. ``overrides`` lets a single item
-    bump max_tokens, change temperature, etc.
+    item can validate against its own schema (a Pydantic class, or a JSON schema
+    dict). ``settings`` carries per-item max_tokens/temperature/top_p/reasoning;
+    ``overrides`` is the raw body escape hatch (deep-merged last).
     """
 
     id: str
     messages: list[Message]
-    response_model: type[BaseModel] | None = None
+    response_model: ResponseSchema | None = None
+    settings: RequestSettings | None = None
     overrides: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -84,4 +103,8 @@ class BatchSummary:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    reasoning_tokens: int = 0
+    # Billable output: per item max(completion, total - prompt), summed. Covers
+    # thinking tokens whether or not the provider's completion count includes them.
+    output_tokens: int = 0
     estimated_cost: float = 0.0

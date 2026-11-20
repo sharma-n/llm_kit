@@ -167,7 +167,7 @@ def test_openai_extract_text_tool_use_style() -> None:
 
 def test_openai_extract_usage() -> None:
     data = {"usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}}
-    assert _fmt().extract_usage(data) == (7, 3, 10)
+    assert _fmt().extract_usage(data) == (7, 3, 10, 0)
 
 
 def test_openai_finish_reason() -> None:
@@ -290,7 +290,7 @@ def test_anthropic_extract_text_concatenates_multiple_text_blocks() -> None:
 
 def test_anthropic_extract_usage() -> None:
     data = {"usage": {"input_tokens": 10, "output_tokens": 5}}
-    assert _afmt().extract_usage(data) == (10, 5, 15)
+    assert _afmt().extract_usage(data) == (10, 5, 15, 0)
 
 
 def test_anthropic_finish_reason() -> None:
@@ -347,7 +347,7 @@ def test_gemini_empty_message_gets_placeholder_part() -> None:
 def test_gemini_structured_output_fields() -> None:
     fields = _gfmt().structured_output_fields(_Foo)
     assert fields["responseMimeType"] == "application/json"
-    assert "properties" in fields["responseSchema"]
+    assert "properties" in fields["responseJsonSchema"]
     assert "output_config" not in fields
 
 
@@ -398,7 +398,7 @@ def test_gemini_build_body_structured_output_in_gen_config() -> None:
         response_model=_Foo,
     )
     assert body["generationConfig"]["responseMimeType"] == "application/json"
-    assert "properties" in body["generationConfig"]["responseSchema"]
+    assert "properties" in body["generationConfig"]["responseJsonSchema"]
 
 
 def test_gemini_build_body_no_gen_config_when_all_none() -> None:
@@ -434,11 +434,11 @@ def test_gemini_extract_text_concatenates_parts() -> None:
 
 def test_gemini_extract_usage() -> None:
     data = {"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5}}
-    assert _gfmt().extract_usage(data) == (10, 5, 15)
+    assert _gfmt().extract_usage(data) == (10, 5, 15, 0)
 
 
 def test_gemini_extract_usage_missing_returns_zeros() -> None:
-    assert _gfmt().extract_usage({}) == (0, 0, 0)
+    assert _gfmt().extract_usage({}) == (0, 0, 0, 0)
 
 
 def test_gemini_finish_reason() -> None:

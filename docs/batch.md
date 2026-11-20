@@ -7,13 +7,14 @@ Two ways to process many prompts: a **live** concurrent pipeline that your proce
 ## Live pipeline — three sinks
 
 ```python
-from llm_kit import BatchItem, ImagePart, Message
+from llm_kit import BatchItem, ImagePart, Message, RequestSettings
 
 items = [
     BatchItem(
         id=f"item-{i:06d}",
         messages=[Message.user("Caption:", ImagePart.from_url("https://..."))],
-        response_model=Sentiment,    # per-item schemas are supported
+        response_model=Sentiment,    # per-item schemas: a Pydantic class or a JSON schema dict
+        settings=RequestSettings(temperature=0.0),  # per-item sampling/reasoning (optional)
     )
     for i in range(1_000_000)
 ]
@@ -64,6 +65,10 @@ if status.state.is_terminal:
         ...
 ```
 
-`response_model` is a Python type, so it isn't persisted in the handle — re-supply `items` at fetch time and per-item schemas validate as usual (metadata is restored from the manifest either way). Results come back as the same `BatchResult` records the live pipeline yields, so the jsonl output and resume-skip behavior are identical. See [examples/provider_batch.py](../examples/provider_batch.py).
+A **dict** `response_model` (JSON schema) is persisted in the handle's manifest, so a fresh process decodes results without the original items. A **Pydantic** class is a Python type and isn't persisted — re-supply `items` at fetch time to validate against it (items win over the manifest; metadata is restored from the manifest either way). Per-item `settings` are baked into each request body at submit time. Handles saved before schemas were persisted still load. Results come back as the same `BatchResult` records the live pipeline yields, so the jsonl output and resume-skip behavior are identical. See [examples/provider_batch.py](../examples/provider_batch.py).
 
 > All three backends follow their providers' documented Batch wire formats and are covered by mock-transport tests; there are no live-key integration tests in-repo. The OpenAI path is the most exercised.
+
+## Per-item settings and usage
+
+`BatchItem.settings` (`RequestSettings`: `max_tokens`, `temperature`, `top_p`, `reasoning`) lets items in one batch differ; unset fields inherit from `LLMConfig`. `BatchItem.overrides` is deep-merged into the body last. `BatchSummary.reasoning_tokens` (and each jsonl record's `usage.reasoning_tokens`) reports thinking tokens; `total_tokens` includes them. Dict-schema results are written to jsonl as plain JSON under `parsed`.
