@@ -14,7 +14,7 @@ The full schema is in [examples/config.yaml](../examples/config.yaml). The secti
 | `rate_limit` | `requests_per_minute`, `tokens_per_minute`, `max_concurrent_requests` |
 | `image` | `max_concurrent_downloads`, `cache_size`, `on_failure`, retry policy for image fetches |
 | `batch` | `worker_concurrency`, `input_buffer_size`, `on_failure`, progress logging |
-| `provider_batch` | `completion_window`, `files_path`, `batches_path`, `poll_interval_seconds`, `max_requests_per_batch` (the offline 24h Batch API driver) |
+| `provider_batch` | `completion_window`, `files_path`, `batches_path`, `poll_interval_seconds`, `max_requests_per_batch`, `backend`, and a nested `vertex` section (the offline 24h Batch API driver; see [batch.md](batch.md#vertex-ai-gemini-batch-backend)) |
 
 A minimal config (only override what you need):
 

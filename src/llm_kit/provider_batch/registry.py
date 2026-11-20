@@ -73,6 +73,33 @@ def _gemini(config: AppConfig, client: httpx.AsyncClient, api_key: str | None) -
     return GeminiBatchBackend(client, config, api_key)
 
 
+_VERTEX_HINT = (
+    'the "vertex" batch backend needs the optional Google SDKs: '
+    'pip install "llm_kit[vertex]"  (or: uv sync --extra vertex)'
+)
+
+
+def _vertex(config: AppConfig, client: httpx.AsyncClient, api_key: str | None) -> BatchBackend:
+    # Vertex reuses the Gemini formatter bodies (invariant #10), so it only makes
+    # sense with message_format: gemini.
+    from llm_kit.config.llm import MessageFormat
+
+    if config.llm.message_format is not MessageFormat.GEMINI:
+        raise ValueError(
+            "the 'vertex' batch backend requires llm.message_format: gemini "
+            f"(got {str(config.llm.message_format)!r})"
+        )
+    try:
+        import google.cloud.storage  # noqa: F401
+        import google.genai  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(_VERTEX_HINT) from exc
+    from llm_kit.provider_batch.vertex import VertexBatchBackend
+
+    return VertexBatchBackend(config)
+
+
 register_batch_backend("openai", _openai)
 register_batch_backend("anthropic", _anthropic)
 register_batch_backend("gemini", _gemini)
+register_batch_backend("vertex", _vertex)

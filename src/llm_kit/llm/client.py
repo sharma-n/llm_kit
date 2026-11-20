@@ -404,6 +404,21 @@ class LLMClient(BaseLLM):
         self._check_job_backend(job)
         return await self._batch_backend.poll(job.batch_id)
 
+    async def cleanup_batch(self, job: BatchJob, **options: Any) -> Any:
+        """Delete provider-side storage for ``job``, if the backend supports it.
+
+        Duck-typed: only backends exposing ``cleanup`` (currently ``vertex``, which
+        takes ``input=`` / ``output=`` overrides of its config flags) qualify; any
+        other raises ``NotImplementedError``.
+        """
+        cleanup = getattr(self._batch_backend, "cleanup", None)
+        if cleanup is None:
+            raise NotImplementedError(
+                f"batch backend {self._batch_backend_name!r} does not support cleanup"
+            )
+        self._check_job_backend(job)
+        return await cleanup(job, **options)
+
     async def fetch_batch_results(
         self,
         job: BatchJob,

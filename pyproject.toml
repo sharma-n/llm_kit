@@ -24,6 +24,10 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
 ]
+vertex = [
+    "google-cloud-storage>=3.17.1",
+    "google-genai>=3.6.1",
+]
 
 [build-system]
 requires = ["hatchling>=1.27"]

@@ -111,6 +111,54 @@ For tests, `llm_kit.testing.FakeBatchBackend` runs the whole offline flow in mem
 
 > All three backends follow their providers' documented Batch wire formats and are covered by mock-transport tests; there are no live-key integration tests in-repo. The OpenAI path is the most exercised.
 
+## Vertex AI (Gemini) batch backend
+
+Gemini on Vertex AI batch prediction (`batchPredictionJobs`) works differently from the Gemini Developer API backend: requests go in a JSONL file on Google Cloud Storage, results come back as JSONL files on GCS. Request and response *bodies* are still the Gemini formatter's; only the transport differs.
+
+```bash
+pip install "llm_kit[vertex]"     # or: uv sync --extra vertex   (google-genai + google-cloud-storage)
+gcloud auth application-default login
+```
+
+```yaml
+llm:
+  message_format: gemini            # required: Vertex reuses the Gemini formatter bodies
+  model: gemini-2.5-flash           # bare name or publishers/google/models/...
+provider_batch:
+  backend: vertex
+  vertex:
+    project: my-project             # null => SDK/ADC default (GOOGLE_CLOUD_PROJECT)
+    location: global
+    gcs_prefix: gs://my-bucket/llm-kit   # required at submit
+    upload_images: false            # true => upload bytes, send fileData gs:// URIs
+    cleanup_input: false            # defaults for cleanup_batch()
+    cleanup_output: false
+    display_name_prefix: llm-kit
+```
+
+Everything else is the normal API (`run_batch_api`, `submit_batch`, `poll_batch`, `fetch_batch_results`).
+
+**Auth and the SDK exception.** The backend never builds tokens or headers: `google-genai` (`genai.Client(vertexai=True, ...)`, async `client.aio.batches`) and `google-cloud-storage` (sync, run via `asyncio.to_thread`) resolve Application Default Credentials themselves and own their transport, so this backend does not use the shared `httpx` client (a documented exception to CLAUDE.md invariant #1). The base install has no Google dependency; selecting `vertex` without the extra raises `ImportError` with the install hint. Both SDK clients can be injected: `VertexBatchBackend(config, genai_client=..., storage_client=...)` passed as `LLMClient(batch_backend=...)`.
+
+**IAM and bucket.** The caller needs `roles/aiplatform.user` on the project and object read/write/list/delete (`roles/storage.objectUser` or similar) on the bucket; the bucket should be in a compatible region/multi-region for the chosen location, and the Vertex AI service agent must be able to read the input and write the output prefix.
+
+**Layout.** Each run gets `{gcs_prefix}/llm-kit-<uuid>/` containing `input.jsonl` (rows `{"request": <Gemini body>}`), `keys.jsonl` (sidecar: `custom_id` plus a canonical hash of the body as written), `output/` (Vertex writes `prediction-model-*/predictions*.jsonl` below it) and, with `upload_images`, `images/<sha256>.<ext>`. `SubmitResult.extra` (stored on `BatchJob.extra`) records `run_prefix`, `input_uri`, `output_uri`, `keys_uri`, `image_uris`, but nothing needs it: fetch and cleanup derive the run directory from the job resource (`src`/`dest`) alone, so a fresh process reconnects with just the saved handle.
+
+**Matching rows to requests.** Vertex output rows carry no custom id and are not guaranteed to be in input order. Each request gets a label `llm_kit_id` (a label-safe encoding of the custom_id; skipped if it would exceed 63 chars). On fetch a row is matched by (1) that label if echoed in the row's `request`, else (2) the canonical hash (sorted-keys JSON, our label dropped) of the echoed `request` against `keys.jsonl`. Identical requests are interchangeable. A row matching neither is logged and skipped; a request with no output row yields a per-item error. A row with non-empty `status` or no `response` is a per-item error. Whether labels are actually echoed, and whether the echoed request is byte-for-byte canonical-equal, is unverified; see [vertex_smoke_test.md](vertex_smoke_test.md).
+
+**Job states.** `QUEUED/PENDING/UNSPECIFIED` -> `PENDING`; `RUNNING/CANCELLING/UPDATING` -> `IN_PROGRESS`; `SUCCEEDED/PARTIALLY_SUCCEEDED` -> `COMPLETED` (failed rows become per-item errors); `FAILED` -> `FAILED` (with `error_detail` from the job error); `CANCELLED`, `EXPIRED`, `PAUSED` map to the same-named states (`PAUSED` is waited through); unknown states stay `IN_PROGRESS` with `raw_state` kept.
+
+**Images.** By default image bytes are inlined (`inlineData`) like the other Gemini paths. With `upload_images: true` the backend uploads each distinct image (deduped by sha256) to `{run}images/` and rewrites the part to `fileData: {mimeType, fileUri}`; use it when requests are too large to inline. Doing this in the backend is acceptable under invariant #2 because it relocates bytes (transport), while the formatter still decides what an image part is.
+
+**Cancel and clean up.**
+
+```python
+deleted = await llm.cleanup_batch(job)                          # uses cleanup_input / cleanup_output
+deleted = await llm.cleanup_batch(job, input=True, output=True) # explicit; returns deleted gs:// URIs
+```
+
+`input` covers `input.jsonl`, `keys.jsonl` and uploaded images; `output` covers `output/`. Delete output only after you have fetched results. Backends without `cleanup` raise `NotImplementedError`.
+
 ## Per-item settings and usage
 
 `BatchItem.settings` (`RequestSettings`: `max_tokens`, `temperature`, `top_p`, `reasoning`) lets items in one batch differ; unset fields inherit from `LLMConfig`. `BatchItem.overrides` is deep-merged into the body last. `BatchSummary.reasoning_tokens` (and each jsonl record's `usage.reasoning_tokens`) reports thinking tokens; `total_tokens` includes them. Dict-schema results are written to jsonl as plain JSON under `parsed`.

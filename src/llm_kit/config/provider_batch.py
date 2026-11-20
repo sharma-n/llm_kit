@@ -10,7 +10,9 @@ the batch's ``endpoint`` target.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from llm_kit.config.vertex import VertexBatchConfig
 
 
 @dataclass(slots=True)
@@ -34,3 +36,6 @@ class ProviderBatchConfig:
     # Which registered batch backend to use (see provider_batch.registry). None
     # means "the one named after LLMConfig.message_format" ("openai", ...).
     backend: str | None = None
+
+    # Vertex AI backend settings (only read when backend == "vertex").
+    vertex: VertexBatchConfig = field(default_factory=VertexBatchConfig)

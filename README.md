@@ -181,6 +181,8 @@ written = await llm.batch_to_jsonl(items, "out.jsonl", resume=True)
 
 There's also a provider-native 24h Batch API (≈50% cheaper) and an embeddings client with input micro-batching. See **[docs/batch.md](docs/batch.md)** and **[docs/embeddings.md](docs/embeddings.md)**.
 
+Gemini on **Vertex AI** (GCS-based batch prediction, Application Default Credentials) is available as the `vertex` batch backend behind an optional extra: `pip install "llm_kit[vertex]"` (`uv sync --extra vertex`), then `provider_batch.backend: vertex` with `llm.message_format: gemini`. See [docs/batch.md](docs/batch.md#vertex-ai-gemini-batch-backend); a manual real-project smoke test is in [docs/vertex_smoke_test.md](docs/vertex_smoke_test.md).
+
 ### Testing offline batches without a network
 
 `llm_kit.testing.FakeBatchBackend` is an in-memory provider batch backend. Inject it and the whole `run_batch_api` / `submit_batch` / `fetch_batch_results` flow runs with no HTTP:
