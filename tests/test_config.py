@@ -10,7 +10,7 @@ import pytest
 from llm_kit.config.app import AppConfig
 from llm_kit.config.batch import BatchFailurePolicy
 from llm_kit.config.image import ImageFailurePolicy
-from llm_kit.config.llm import StructuredOutputStyle
+from llm_kit.config.llm import MessageFormat, StructuredOutputStyle
 
 
 def _write(tmp_path: Path, body: str) -> Path:
@@ -24,8 +24,9 @@ def test_load_example_config_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LLM_MODEL", raising=False)
     cfg = AppConfig.from_yaml(Path("examples/config.yaml"))
 
-    assert cfg.llm.base_url == "https://api.openai.com"  # default branch
-    assert cfg.llm.model == "gpt-4o-mini"
+    assert cfg.llm.base_url == "https://api.anthropic.com"  # default branch
+    assert cfg.llm.model == "claude-haiku-4-5-20251001"
+    assert cfg.llm.message_format is MessageFormat.ANTHROPIC
     assert cfg.llm.structured_output_style is StructuredOutputStyle.OPENAI_JSON_SCHEMA
     assert cfg.rate_limit.requests_per_minute == 3000
     assert cfg.rate_limit.tokens_per_minute == 1500000
