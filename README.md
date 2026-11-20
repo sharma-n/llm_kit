@@ -17,7 +17,7 @@ That's what this is.
 
 ## Install
 
-This is a `uv`-managed project on Python 3.13+.
+This is a `uv`-managed project on Python 3.13+. Supported (and tested in CI): Python 3.13 and 3.14.
 
 ```bash
 uv sync               # production deps only
@@ -190,4 +190,4 @@ benchmarks/      # load tests
 
 ## License
 
-Add your own.
+MIT. See [LICENSE](LICENSE).
