@@ -45,7 +45,7 @@ Memory is O(`worker_concurrency` + `input_buffer_size`), not O(N) — which is w
 
 The three sinks above run a *live* concurrent pipeline — your process holds the connections and paces requests through the rate limiter. The **provider batch API** is the opposite trade: hand the whole `list[BatchItem]` to the provider's 24h asynchronous batch endpoint (OpenAI Files + Batches, Anthropic Message Batches, or Google Gemini Batch Mode), poll until it finishes, then download and reconcile. Roughly half the price, at the cost of latency — and the job outlives your process.
 
-Same `BatchItem` in, same `BatchResult` out — only the middle differs (no worker pool, no rate limiter). The backend is selected automatically from `message_format`.
+Same `BatchItem` in, same `BatchResult` out — only the middle differs (no worker pool, no rate limiter). The backend is selected from `ProviderBatchConfig.backend` (a registered name) or, when that is `None`, from `message_format`.
 
 ```python
 from llm_kit import BatchJob
@@ -66,6 +66,33 @@ if status.state.is_terminal:
 ```
 
 A **dict** `response_model` (JSON schema) is persisted in the handle's manifest, so a fresh process decodes results without the original items. A **Pydantic** class is a Python type and isn't persisted — re-supply `items` at fetch time to validate against it (items win over the manifest; metadata is restored from the manifest either way). Per-item `settings` are baked into each request body at submit time. Handles saved before schemas were persisted still load. Results come back as the same `BatchResult` records the live pipeline yields, so the jsonl output and resume-skip behavior are identical. See [examples/provider_batch.py](../examples/provider_batch.py).
+
+### Raw requests, custom and fake backends
+
+`submit_requests` skips `BatchItem` serialization: you hand it `BatchRequest(custom_id, body)` objects and the bodies reach the backend untouched (`ValueError` on duplicate `custom_id` or more than `max_requests_per_batch`). `fetch_raw_results(job)` is the matching un-parsed iterator of `RawResult`s.
+
+```python
+from llm_kit import BatchRequest
+
+job = await llm.submit_requests(
+    [BatchRequest("a", {...provider body...})], metadata={"a": {"tag": "x"}}
+)
+async for raw in llm.fetch_raw_results(job):   # raw.inner_body or raw.error
+    ...
+```
+
+Backends are pluggable. Inject one directly (`LLMClient(cfg, batch_backend=my_backend)`, also `from_yaml(path, batch_backend=...)`), or register a factory and select it by name:
+
+```python
+from llm_kit import register_batch_backend
+
+register_batch_backend("mine", lambda config, client, api_key: MyBackend(...))  # replace=True to override
+# config: provider_batch: { backend: mine }   (None => the message_format value)
+```
+
+An unknown name raises `ValueError` listing the registered ones. A factory may import optional dependencies lazily. `BatchBackend.submit` returns either the batch id (`str`) or `SubmitResult(batch_id, extra)`; `extra` (JSON-serialisable) is stored on `BatchJob.extra`. `BatchJob.backend` records which backend submitted the job (old files fall back to `provider`); resuming with a different backend logs a warning but proceeds. Note `extra` is persisted and available on the job, but `poll`/`fetch_results` are still called with the batch id / status only.
+
+For tests, `llm_kit.testing.FakeBatchBackend` runs the whole offline flow in memory (see the README). Its state lives on the instance, so a second client sharing it can resume a saved job.
 
 > All three backends follow their providers' documented Batch wire formats and are covered by mock-transport tests; there are no live-key integration tests in-repo. The OpenAI path is the most exercised.
 

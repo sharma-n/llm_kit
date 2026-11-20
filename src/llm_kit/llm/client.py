@@ -13,7 +13,7 @@ import logging
 import os
 import copy
 import time
-from collections.abc import AsyncIterable, AsyncIterator
+from collections.abc import AsyncIterable, AsyncIterator, Mapping
 from pathlib import Path
 from typing import Any, Self
 
@@ -34,9 +34,16 @@ from llm_kit.messages.schema import ResponseSchema
 from llm_kit.messages.settings import RequestSettings
 from llm_kit.messages.tools import ToolDefinition
 from llm_kit.messages.types import ImagePart, Message
-from llm_kit.provider_batch.driver import build_backend, reconcile, serialize_items
+from llm_kit.provider_batch.backend import BatchBackend
+from llm_kit.provider_batch.driver import reconcile, serialize_items
 from llm_kit.provider_batch.job import BatchJob
-from llm_kit.provider_batch.types import BatchJobStatus
+from llm_kit.provider_batch.registry import backend_name, build_backend
+from llm_kit.provider_batch.types import (
+    BatchJobStatus,
+    BatchRequest,
+    RawResult,
+    SubmitResult,
+)
 from llm_kit.rate_limit.limiter import RateLimiter, TokenEstimator
 
 logger = logging.getLogger(__name__)
@@ -62,6 +69,7 @@ class LLMClient(BaseLLM):
         client: httpx.AsyncClient | None = None,
         token_estimator: TokenEstimator | None = None,
         owns_client: bool | None = None,
+        batch_backend: BatchBackend | None = None,
     ) -> None:
         self._config = config
         self._client = client or build_async_client(config.http)
@@ -81,13 +89,23 @@ class LLMClient(BaseLLM):
         self._images = ImageFetcher(self._client, config.image)
         self._limiter = RateLimiter(config.rate_limit, token_estimator=token_estimator)
         self._api_key = self._resolve_api_key(config.llm)
-        self._batch_backend = build_backend(config, self._client, self._api_key)
+        # An injected backend is used as-is (the registry is bypassed). Its name
+        # is its ``name`` attribute if it has one, else the configured name.
+        if batch_backend is not None:
+            self._batch_backend = batch_backend
+            self._batch_backend_name = str(
+                getattr(batch_backend, "name", None) or backend_name(config)
+            )
+        else:
+            self._batch_backend = build_backend(config, self._client, self._api_key)
+            self._batch_backend_name = backend_name(config)
 
     # ------------------------------------------------------------------ public
 
     @classmethod
-    def from_yaml(cls, path: str) -> Self:
-        return cls(AppConfig.from_yaml(path))
+    def from_yaml(cls, path: str, **kwargs: Any) -> Self:
+        """Build from a YAML config; ``kwargs`` go to ``__init__`` (e.g. ``batch_backend``)."""
+        return cls(AppConfig.from_yaml(path), **kwargs)
 
     async def invoke(
         self,
@@ -232,15 +250,82 @@ class LLMClient(BaseLLM):
         requests, manifest = await serialize_items(
             self._build_request_body, items, max_requests=cfg.max_requests_per_batch
         )
-        batch_id = await self._batch_backend.submit(requests)
+        return await self._submit(requests, manifest)
+
+    async def submit_requests(
+        self,
+        requests: list[BatchRequest],
+        *,
+        metadata: Mapping[str, dict[str, Any]] | None = None,
+    ) -> BatchJob:
+        """Submit pre-built ``BatchRequest``s, bypassing ``BatchItem`` serialization.
+
+        Bodies reach the backend untouched (no formatter, no image fetching) — the
+        caller owns their provider shape. ``metadata`` maps ``custom_id`` to a
+        dict stored on the job manifest. Raises ``ValueError`` on duplicate
+        ``custom_id`` or more than ``max_requests_per_batch`` requests. Read
+        results back with ``fetch_raw_results`` (or ``fetch_batch_results``).
+        """
+        max_requests = self._config.provider_batch.max_requests_per_batch
+        if len(requests) > max_requests:
+            raise ValueError(
+                f"batch of {len(requests)} requests exceeds max_requests_per_batch={max_requests}"
+            )
+        seen: set[str] = set()
+        for r in requests:
+            if r.custom_id in seen:
+                raise ValueError(f"duplicate custom_id {r.custom_id!r} in batch")
+            seen.add(r.custom_id)
+        meta = metadata or {}
+        manifest = {r.custom_id: {"metadata": dict(meta.get(r.custom_id, {}))} for r in requests}
+        return await self._submit(requests, manifest)
+
+    async def _submit(
+        self, requests: list[BatchRequest], manifest: dict[str, dict[str, Any]]
+    ) -> BatchJob:
+        submitted = await self._batch_backend.submit(requests)
+        if isinstance(submitted, SubmitResult):
+            batch_id, extra = submitted.batch_id, dict(submitted.extra)
+        else:
+            batch_id, extra = submitted, {}
         return BatchJob(
             provider=str(self._config.llm.message_format),
             batch_id=batch_id,
             manifest=manifest,
+            backend=self._batch_backend_name,
+            extra=extra,
         )
+
+    def _check_job_backend(self, job: BatchJob) -> None:
+        if job.backend != self._batch_backend_name:
+            logger.warning(
+                "batch job %s was submitted by backend %r but this client uses %r",
+                job.batch_id,
+                job.backend,
+                self._batch_backend_name,
+            )
+
+    async def _fetch_raw(
+        self, job: BatchJob, status: BatchJobStatus | None = None
+    ) -> AsyncIterator[RawResult]:
+        """The single place results are pulled from the backend.
+
+        Polls for a fresh status unless the caller already holds one.
+        """
+        self._check_job_backend(job)
+        if status is None:
+            status = await self._batch_backend.poll(job.batch_id)
+        async for raw in self._batch_backend.fetch_results(status):
+            yield raw
+
+    async def fetch_raw_results(self, job: BatchJob) -> AsyncIterator[RawResult]:
+        """Yield the provider's per-request results for ``job`` without parsing."""
+        async for raw in self._fetch_raw(job):
+            yield raw
 
     async def poll_batch(self, job: BatchJob) -> BatchJobStatus:
         """Return a normalized status snapshot for the submitted job."""
+        self._check_job_backend(job)
         return await self._batch_backend.poll(job.batch_id)
 
     async def fetch_batch_results(
@@ -253,10 +338,9 @@ class LLMClient(BaseLLM):
         (Pydantic class, no items) results come back as raw text. Metadata is
         always restored from the job manifest.
         """
-        status = await self._batch_backend.poll(job.batch_id)
         response_models = self._response_models_for(job, items)
         metadata = {cid: job.metadata_for(cid) for cid in job.manifest}
-        raw = self._batch_backend.fetch_results(status)
+        raw = self._fetch_raw(job)
         async for result in reconcile(
             raw, self._formatter, response_models=response_models, metadata=metadata
         ):
@@ -286,6 +370,7 @@ class LLMClient(BaseLLM):
             else self._config.provider_batch.poll_interval_seconds
         )
         job = resume_job or await self.submit_batch(items)
+        self._check_job_backend(job)
 
         status = await self._batch_backend.poll(job.batch_id)
         while not status.state.is_terminal:
@@ -298,7 +383,7 @@ class LLMClient(BaseLLM):
             logger.info("resuming: %d items already in %s", len(completed), path)
         response_models = self._response_models_for(job, items)
         metadata = {cid: job.metadata_for(cid) for cid in job.manifest}
-        raw = self._batch_backend.fetch_results(status)
+        raw = self._fetch_raw(job, status)
         results = reconcile(
             raw, self._formatter, response_models=response_models, metadata=metadata
         )

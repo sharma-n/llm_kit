@@ -181,6 +181,22 @@ written = await llm.batch_to_jsonl(items, "out.jsonl", resume=True)
 
 There's also a provider-native 24h Batch API (≈50% cheaper) and an embeddings client with input micro-batching. See **[docs/batch.md](docs/batch.md)** and **[docs/embeddings.md](docs/embeddings.md)**.
 
+### Testing offline batches without a network
+
+`llm_kit.testing.FakeBatchBackend` is an in-memory provider batch backend. Inject it and the whole `run_batch_api` / `submit_batch` / `fetch_batch_results` flow runs with no HTTP:
+
+```python
+from llm_kit import LLMClient
+from llm_kit.testing import FakeBatchBackend
+
+fake = FakeBatchBackend(polls_until_done=2, fail_items={"item-3": "boom"}, shuffle=True)
+llm = LLMClient(config, batch_backend=fake)
+await llm.run_batch_api(items, "out.jsonl", poll_interval=0)
+fake.submitted            # {batch_id: [BatchRequest, ...]} as the backend received them
+```
+
+Use `responder=` (callable or `{custom_id: body}`) or `FakeBatchBackend.text_responder(fmt, fn)` to shape responses, and `fail_job=BatchState.EXPIRED` for whole-job failure. To bypass `BatchItem`, use `llm.submit_requests([BatchRequest(id, body)])` and `llm.fetch_raw_results(job)`. Details in [docs/batch.md](docs/batch.md).
+
 ## Documentation
 
 | Topic | |

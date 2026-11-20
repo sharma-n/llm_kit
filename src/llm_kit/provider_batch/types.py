@@ -43,6 +43,20 @@ class BatchRequest:
 
 
 @dataclass(slots=True, frozen=True)
+class SubmitResult:
+    """Optional richer return value of ``BatchBackend.submit``.
+
+    A backend that has nothing beyond the batch id to remember returns a bare
+    ``str``. One that needs backend-specific state to resume later (an output
+    URI, a region, ...) returns ``SubmitResult(batch_id, extra)``; ``extra`` must
+    be JSON-serialisable — it is stored on ``BatchJob.extra``.
+    """
+
+    batch_id: str
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True, frozen=True)
 class RawResult:
     """One downloaded result, still raw.
 

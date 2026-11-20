@@ -14,19 +14,14 @@ import copy
 from collections.abc import AsyncIterator, Awaitable
 from typing import Any, Protocol
 
-import httpx
-from llm_kit.config.app import AppConfig
-from llm_kit.config.llm import MessageFormat
 from llm_kit.errors import LLMError
 from llm_kit.llm.parsing import ResponseParser, parse_response
 from llm_kit.llm.response import BatchItem, BatchResult
 from llm_kit.messages.schema import ResponseSchema
 from llm_kit.messages.settings import RequestSettings
 from llm_kit.messages.types import Message
-from llm_kit.provider_batch.anthropic import AnthropicBatchBackend
 from llm_kit.provider_batch.backend import BatchBackend
-from llm_kit.provider_batch.gemini import GeminiBatchBackend
-from llm_kit.provider_batch.openai import OpenAIBatchBackend
+from llm_kit.provider_batch.registry import build_backend  # noqa: F401  (compat re-export)
 from llm_kit.provider_batch.types import BatchJobStatus, BatchRequest, RawResult
 
 class BodyBuilder(Protocol):
@@ -40,21 +35,6 @@ class BodyBuilder(Protocol):
         settings: RequestSettings | None = None,
         overrides: dict[str, Any] | None = None,
     ) -> Awaitable[dict[str, Any]]: ...
-
-
-def build_backend(
-    config: AppConfig, client: httpx.AsyncClient, api_key: str | None
-) -> BatchBackend:
-    """Select the transport backend for the configured provider.
-
-    Mirrors the formatter selection in ``LLMClient`` — keyed by ``message_format``.
-    """
-    fmt = config.llm.message_format
-    if fmt is MessageFormat.ANTHROPIC:
-        return AnthropicBatchBackend(client, config, api_key)
-    if fmt is MessageFormat.GEMINI:
-        return GeminiBatchBackend(client, config, api_key)
-    return OpenAIBatchBackend(client, config, api_key)
 
 
 async def serialize_items(

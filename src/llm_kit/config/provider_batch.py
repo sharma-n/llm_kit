@@ -30,3 +30,7 @@ class ProviderBatchConfig:
     # Soft guard against accidentally submitting an over-large single batch.
     # OpenAI's published ceiling is 50k requests per batch.
     max_requests_per_batch: int = 50_000
+
+    # Which registered batch backend to use (see provider_batch.registry). None
+    # means "the one named after LLMConfig.message_format" ("openai", ...).
+    backend: str | None = None

@@ -32,6 +32,16 @@ class BatchJob:
     input_file_id: str | None = None  # OpenAI uploaded-file id (None for inline providers)
     # custom_id -> {"metadata": {...}, "response_schema": {...}?}; reconciliation lookup.
     manifest: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Registered name of the backend that submitted the job. Differs from
+    # ``provider`` when ``ProviderBatchConfig.backend`` overrides the default or a
+    # backend was injected. Empty means "same as provider" (old handles).
+    backend: str = ""
+    # Backend-specific JSON-serialisable state (from ``SubmitResult.extra``).
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.backend:
+            self.backend = self.provider
 
     def metadata_for(self, custom_id: str) -> dict[str, Any]:
         entry = self.manifest.get(custom_id) or {}
@@ -58,6 +68,8 @@ class BatchJob:
             batch_id=data["batch_id"],
             input_file_id=data.get("input_file_id"),
             manifest=data.get("manifest") or {},
+            backend=data.get("backend") or data["provider"],
+            extra=data.get("extra") or {},
         )
 
     def _to_dict(self) -> dict[str, Any]:
@@ -66,4 +78,6 @@ class BatchJob:
             "batch_id": self.batch_id,
             "input_file_id": self.input_file_id,
             "manifest": self.manifest,
+            "backend": self.backend,
+            "extra": self.extra,
         }
