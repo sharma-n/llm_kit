@@ -6,10 +6,10 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
-from pydantic import BaseModel
-
 from llm_kit.errors import ProviderError
-from llm_kit.messages.formatter._shared import parse_arguments
+from llm_kit.messages.formatter._shared import message_text, parse_arguments, resolve_budget
+from llm_kit.messages.schema import ResponseSchema, json_schema
+from llm_kit.messages.settings import Reasoning
 from llm_kit.messages.streaming import (
     FinishFragment,
     MetaFragment,
@@ -19,7 +19,7 @@ from llm_kit.messages.streaming import (
     UsageFragment,
 )
 from llm_kit.messages.tools import ToolCall, ToolDefinition
-from llm_kit.messages.types import Message, Role
+from llm_kit.messages.types import ImagePart, Message, Role, TextPart
 
 
 def _anthropic_tool_choice(
@@ -87,7 +87,7 @@ class AnthropicFormatter:
     def format_messages(
         self,
         messages: list[Message],
-        encoded_images: dict[str, str],
+        encoded_images: dict[ImagePart, str],
     ) -> list[dict[str, Any]]:
         """Build the ``messages`` array, excluding system messages.
 
@@ -118,7 +118,7 @@ class AnthropicFormatter:
                     {
                         "type": "tool_result",
                         "tool_use_id": msg.tool_call_id or "",
-                        "content": msg.text or "",
+                        "content": message_text(msg),
                     }
                 )
                 continue
@@ -145,10 +145,10 @@ class AnthropicFormatter:
         return out
 
     def system_prompt(self, messages: list[Message]) -> str | None:
-        texts = [msg.text or "" for msg in messages if msg.role is Role.SYSTEM]
+        texts = [message_text(msg) for msg in messages if msg.role is Role.SYSTEM]
         return "\n\n".join(texts) if texts else None
 
-    def structured_output_fields(self, model: type[BaseModel] | None) -> dict[str, Any]:
+    def structured_output_fields(self, model: ResponseSchema | None) -> dict[str, Any]:
         """Return top-level body fields for structured output using output_config.format."""
         if model is None:
             return {}
@@ -156,7 +156,7 @@ class AnthropicFormatter:
             "output_config": {
                 "format": {
                     "type": "json_schema",
-                    "schema": _enforce_no_additional_properties(model.model_json_schema()),
+                    "schema": _enforce_no_additional_properties(json_schema(model)),
                 }
             }
         }
@@ -181,7 +181,8 @@ class AnthropicFormatter:
         top_p: float | None,
         max_tokens: int | None,
         extra_sampling: dict[str, Any],
-        response_model: type[BaseModel] | None,
+        response_model: ResponseSchema | None,
+        reasoning: Reasoning | None = None,
         tools: list[ToolDefinition] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         stream: bool = False,
@@ -196,6 +197,11 @@ class AnthropicFormatter:
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
         body.update(extra_sampling)
+        budget = resolve_budget(reasoning)
+        if budget is not None:
+            # Provider-side validation (min budget, temperature, max_tokens >
+            # budget) is deliberately left to Anthropic.
+            body["thinking"] = {"type": "enabled", "budget_tokens": budget}
         body.update(self.structured_output_fields(response_model))
         if tools:
             body["tools"] = [
@@ -222,6 +228,7 @@ class AnthropicFormatter:
             raise ProviderError(
                 f"missing or unexpected 'content' in Anthropic response: {data!r}"
             )
+        # Only ``text`` blocks: ``thinking`` / ``redacted_thinking`` are skipped.
         return "".join(
             block.get("text", "")
             for block in content
@@ -301,6 +308,7 @@ class AnthropicFormatter:
                     text = delta.get("text")
                     if text:
                         yield TextFragment(text=text)
+                # ``thinking_delta`` / ``signature_delta`` are deliberately ignored.
                 elif dtype == "input_json_delta":
                     yield ToolCallFragment(
                         index=int(event.get("index", 0) or 0),
@@ -322,12 +330,16 @@ class AnthropicFormatter:
             elif etype == "message_stop":
                 break
 
-    def extract_usage(self, data: dict[str, Any]) -> tuple[int, int, int]:
-        """Return ``(prompt_tokens, completion_tokens, total_tokens)``."""
+    def extract_usage(self, data: dict[str, Any]) -> tuple[int, int, int, int]:
+        """Return ``(prompt, completion, total, reasoning)``.
+
+        Anthropic bills thinking inside ``output_tokens`` and does not report it
+        separately, so ``reasoning`` is always 0 (the total still includes it).
+        """
         usage = data.get("usage") or {}
         prompt = int(usage.get("input_tokens", 0) or 0)
         completion = int(usage.get("output_tokens", 0) or 0)
-        return prompt, completion, prompt + completion
+        return prompt, completion, prompt + completion, 0
 
     def finish_reason(self, data: dict[str, Any]) -> str | None:
         return data.get("stop_reason")
@@ -337,18 +349,19 @@ class AnthropicFormatter:
     def _build_content(
         self,
         msg: Message,
-        encoded_images: dict[str, str],
+        encoded_images: dict[ImagePart, str],
     ) -> str | list[dict[str, Any]]:
-        if not msg.image_urls:
-            return msg.text or ""
-        parts: list[dict[str, Any]] = []
-        if msg.text:
-            parts.append({"type": "text", "text": msg.text})
-        for url in msg.image_urls:
-            data_url = encoded_images.get(url)
+        if all(isinstance(p, TextPart) for p in msg.parts) and len(msg.parts) <= 1:
+            return msg.parts[0].text if msg.parts else ""  # type: ignore[union-attr]
+        blocks: list[dict[str, Any]] = []
+        for part in msg.parts:
+            if isinstance(part, TextPart):
+                blocks.append({"type": "text", "text": part.text})
+                continue
+            data_url = encoded_images.get(part)
             if data_url is None:
                 continue
-            image_part = _data_url_to_anthropic_image(data_url)
-            if image_part is not None:
-                parts.append(image_part)
-        return parts
+            image_block = _data_url_to_anthropic_image(data_url)
+            if image_block is not None:
+                blocks.append(image_block)
+        return blocks

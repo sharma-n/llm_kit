@@ -14,6 +14,8 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+
 from llm_kit.llm.response import BatchResult, LLMResponse, TokenUsage
 
 logger = logging.getLogger(__name__)
@@ -80,7 +82,7 @@ def _result_to_dict(result: BatchResult) -> dict[str, Any]:
 def _response_to_dict(response: LLMResponse) -> dict[str, Any]:
     return {
         "text": response.text,
-        "parsed": response.parsed.model_dump() if response.parsed is not None else None,
+        "parsed": _parsed_to_jsonable(response.parsed),
         "usage": _usage_to_dict(response.usage),
         "model": response.model,
         "finish_reason": response.finish_reason,
@@ -88,11 +90,19 @@ def _response_to_dict(response: LLMResponse) -> dict[str, Any]:
     }
 
 
+def _parsed_to_jsonable(parsed: Any) -> Any:
+    """Pydantic models are dumped; dict-schema results (dicts/lists/scalars) pass as-is."""
+    if isinstance(parsed, BaseModel):
+        return parsed.model_dump()
+    return parsed
+
+
 def _usage_to_dict(usage: TokenUsage) -> dict[str, int]:
     return {
         "prompt_tokens": usage.prompt_tokens,
         "completion_tokens": usage.completion_tokens,
         "total_tokens": usage.total_tokens,
+        "reasoning_tokens": usage.reasoning_tokens,
     }
 
 

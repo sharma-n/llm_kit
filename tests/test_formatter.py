@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from llm_kit.config.llm import StructuredOutputStyle
 from llm_kit.messages.formatter import AnthropicFormatter, GeminiFormatter, OpenAIFormatter
-from llm_kit.messages.types import Message
+from llm_kit.messages.types import ImagePart, Message, TextPart
 
 
 def _fmt(style: StructuredOutputStyle = StructuredOutputStyle.OPENAI_JSON_SCHEMA) -> OpenAIFormatter:
@@ -35,8 +35,8 @@ def test_text_only_message_uses_string_content() -> None:
 
 
 def test_message_with_image_uses_content_array() -> None:
-    msgs = [Message.user("look:", image_urls=["http://x/a.png"])]
-    out = _fmt().format_messages(msgs, {"http://x/a.png": "data:image/png;base64,AAA"})
+    msgs = [Message.user("look:", ImagePart.from_url("http://x/a.png"))]
+    out = _fmt().format_messages(msgs, {ImagePart.from_url("http://x/a.png"): "data:image/png;base64,AAA"})
     content = out[0]["content"]
     assert isinstance(content, list)
     assert content[0] == {"type": "text", "text": "look:"}
@@ -47,8 +47,8 @@ def test_message_with_image_uses_content_array() -> None:
 
 
 def test_image_only_message_omits_text_part() -> None:
-    msgs = [Message.user(None, image_urls=["http://x/a.png"])]
-    out = _fmt().format_messages(msgs, {"http://x/a.png": "data:image/png;base64,AAA"})
+    msgs = [Message.user(ImagePart.from_url("http://x/a.png"))]
+    out = _fmt().format_messages(msgs, {ImagePart.from_url("http://x/a.png"): "data:image/png;base64,AAA"})
     content = out[0]["content"]
     assert isinstance(content, list)
     assert len(content) == 1
@@ -57,8 +57,8 @@ def test_image_only_message_omits_text_part() -> None:
 
 def test_missing_encoded_image_is_skipped() -> None:
     """If the fetcher's SKIP policy dropped a URL, the formatter mirrors that."""
-    msgs = [Message.user("text", image_urls=["http://x/a.png", "http://x/b.png"])]
-    encoded = {"http://x/a.png": "data:image/png;base64,AAA"}  # b.png missing
+    msgs = [Message.user("text", ImagePart.from_url("http://x/a.png"), ImagePart.from_url("http://x/b.png"))]
+    encoded = {ImagePart.from_url("http://x/a.png"): "data:image/png;base64,AAA"}  # b.png missing
     out = _fmt().format_messages(msgs, encoded)
     content = out[0]["content"]
     image_urls = [p["image_url"]["url"] for p in content if p["type"] == "image_url"]
@@ -167,7 +167,7 @@ def test_openai_extract_text_tool_use_style() -> None:
 
 def test_openai_extract_usage() -> None:
     data = {"usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}}
-    assert _fmt().extract_usage(data) == (7, 3, 10)
+    assert _fmt().extract_usage(data) == (7, 3, 10, 0)
 
 
 def test_openai_finish_reason() -> None:
@@ -209,8 +209,8 @@ def test_anthropic_text_message_uses_string_content() -> None:
 
 
 def test_anthropic_image_format_uses_base64_source() -> None:
-    msgs = [Message.user("look:", image_urls=["http://x/a.png"])]
-    out = _afmt().format_messages(msgs, {"http://x/a.png": "data:image/png;base64,AAA="})
+    msgs = [Message.user("look:", ImagePart.from_url("http://x/a.png"))]
+    out = _afmt().format_messages(msgs, {ImagePart.from_url("http://x/a.png"): "data:image/png;base64,AAA="})
     content = out[0]["content"]
     assert isinstance(content, list)
     assert content[0] == {"type": "text", "text": "look:"}
@@ -290,7 +290,7 @@ def test_anthropic_extract_text_concatenates_multiple_text_blocks() -> None:
 
 def test_anthropic_extract_usage() -> None:
     data = {"usage": {"input_tokens": 10, "output_tokens": 5}}
-    assert _afmt().extract_usage(data) == (10, 5, 15)
+    assert _afmt().extract_usage(data) == (10, 5, 15, 0)
 
 
 def test_anthropic_finish_reason() -> None:
@@ -332,22 +332,22 @@ def test_gemini_text_message_uses_parts() -> None:
 
 
 def test_gemini_image_format_uses_inline_data() -> None:
-    msgs = [Message.user("look:", image_urls=["http://x/a.png"])]
-    out = _gfmt().format_messages(msgs, {"http://x/a.png": "data:image/png;base64,AAA="})
+    msgs = [Message.user("look:", ImagePart.from_url("http://x/a.png"))]
+    out = _gfmt().format_messages(msgs, {ImagePart.from_url("http://x/a.png"): "data:image/png;base64,AAA="})
     parts = out[0]["parts"]
     assert parts[0] == {"text": "look:"}
     assert parts[1] == {"inlineData": {"mimeType": "image/png", "data": "AAA="}}
 
 
 def test_gemini_empty_message_gets_placeholder_part() -> None:
-    out = _gfmt().format_messages([Message.user(None)], {})
+    out = _gfmt().format_messages([Message.user()], {})
     assert out[0]["parts"] == [{"text": ""}]
 
 
 def test_gemini_structured_output_fields() -> None:
     fields = _gfmt().structured_output_fields(_Foo)
     assert fields["responseMimeType"] == "application/json"
-    assert "properties" in fields["responseSchema"]
+    assert "properties" in fields["responseJsonSchema"]
     assert "output_config" not in fields
 
 
@@ -398,7 +398,7 @@ def test_gemini_build_body_structured_output_in_gen_config() -> None:
         response_model=_Foo,
     )
     assert body["generationConfig"]["responseMimeType"] == "application/json"
-    assert "properties" in body["generationConfig"]["responseSchema"]
+    assert "properties" in body["generationConfig"]["responseJsonSchema"]
 
 
 def test_gemini_build_body_no_gen_config_when_all_none() -> None:
@@ -434,11 +434,11 @@ def test_gemini_extract_text_concatenates_parts() -> None:
 
 def test_gemini_extract_usage() -> None:
     data = {"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5}}
-    assert _gfmt().extract_usage(data) == (10, 5, 15)
+    assert _gfmt().extract_usage(data) == (10, 5, 15, 0)
 
 
 def test_gemini_extract_usage_missing_returns_zeros() -> None:
-    assert _gfmt().extract_usage({}) == (0, 0, 0)
+    assert _gfmt().extract_usage({}) == (0, 0, 0, 0)
 
 
 def test_gemini_finish_reason() -> None:

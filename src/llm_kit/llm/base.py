@@ -13,11 +13,11 @@ from collections.abc import AsyncIterable, AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel
-
 from llm_kit.batch.ledger import UsageLedger
 from llm_kit.errors import LLMError
 from llm_kit.llm.response import BatchItem, BatchResult, BatchSummary, LLMResponse
+from llm_kit.messages.schema import ResponseSchema
+from llm_kit.messages.settings import RequestSettings
 from llm_kit.messages.types import Message
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,8 @@ class BaseLLM(ABC):
         self,
         messages: list[Message],
         *,
-        response_model: type[BaseModel] | None = None,
+        response_model: ResponseSchema | None = None,
+        settings: RequestSettings | None = None,
         overrides: dict[str, Any] | None = None,
     ) -> LLMResponse:
         """Issue a single chat-completion request.
@@ -43,7 +44,8 @@ class BaseLLM(ABC):
         self,
         messages: list[Message],
         *,
-        response_model: type[BaseModel] | None = None,
+        response_model: ResponseSchema | None = None,
+        settings: RequestSettings | None = None,
         overrides: dict[str, Any] | None = None,
         tools: Any = None,
         tool_choice: Any = None,

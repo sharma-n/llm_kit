@@ -9,7 +9,7 @@ Bring your own endpoint — OpenAI, Anthropic, Google Gemini, or anything else t
 Most LLM client libraries assume one provider, one model, and synchronous calls. When you're building agentic systems or running large multimodal batches, you usually need:
 
 - **Provider freedom** — swap OpenAI for vLLM / Together / Anthropic / a local Ollama instance with a config change, not a code change.
-- **Multimodal by default** — every message can carry zero, one, or many image URLs, and they should be fetched, encoded, and inlined transparently.
+- **Multimodal by default** — every message is an ordered list of text and image parts (URLs, `data:` URLs, or raw bytes); images are fetched/encoded and inlined transparently, preserving order.
 - **Real throughput** — async, persistent HTTPS connections, RPM and TPM rate limits respected, hundreds of concurrent requests.
 - **Big batches without OOM** — run a million prompts through and stream results to disk as they complete.
 
@@ -17,7 +17,7 @@ That's what this is.
 
 ## Install
 
-This is a `uv`-managed project on Python 3.13+.
+This is a `uv`-managed project on Python 3.13+. Supported (and tested in CI): Python 3.13 and 3.14.
 
 ```bash
 uv sync               # production deps only
@@ -32,7 +32,7 @@ The package is `llm_kit`.
 
 ```python
 import asyncio
-from llm_kit import Message, LLMClient
+from llm_kit import ImagePart, Message, LLMClient
 
 async def main():
     async with LLMClient.from_yaml("examples/config.yaml") as llm:
@@ -50,15 +50,17 @@ Set `OPENAI_API_KEY` (or whichever env var your config points at) and run with `
 
 ### Single request with images
 
-Any URL goes in `image_urls`; `llm_kit` fetches and base64-encodes it before sending.
+Messages are ordered lists of text and image parts (`Message.user` turns `str` arguments into `TextPart`s). An `ImagePart` is a URL (fetched and base64-encoded before sending), a `data:` URL (passed through), or raw bytes (`ImagePart.from_bytes(data, "image/png")`, encoded once, never fetched). Order is preserved on the wire.
 
 ```python
 response = await llm.invoke([
     Message.system("Describe the image in one sentence."),
-    Message.user("Caption this:", image_urls=[
-        "https://example.com/cat.jpg",
-        "https://example.com/dog.png",
-    ]),
+    Message.user(
+        "Caption this:",
+        ImagePart.from_url("https://example.com/cat.jpg"),
+        "and compare it with:",
+        ImagePart.from_url("https://example.com/dog.png"),
+    ),
 ])
 ```
 
@@ -81,6 +83,45 @@ print(response.parsed.label, response.parsed.confidence)
 ```
 
 If the model rejects the response, you get a typed `ValidationError` (subclass of `LLMError`) with the raw content attached for debugging.
+
+**JSON schema dicts.** Anywhere a `response_model` is accepted (`invoke`, `invoke_stream`, `BatchItem`) you can pass a plain JSON schema `dict` instead. The schema goes to the provider the same way, but there is no Pydantic validation: `response.parsed` is just the decoded JSON (`dict`/`list`/...). Text that isn't valid JSON raises `ValidationError` (a `BatchResult.error` in batches). The schema's `"title"` (default `"response"`) names it where a provider needs a name; your dict is never mutated. Gemini receives both kinds as `generationConfig.responseJsonSchema`, so `$ref`/`$defs` work.
+
+```python
+schema = {
+    "title": "Verdict",
+    "type": "object",
+    "properties": {"label": {"type": "string"}, "score": {"type": "number"}},
+    "required": ["label"],
+}
+response = await llm.invoke([Message.user("verdict?")], response_model=schema)
+print(response.parsed["label"])
+```
+
+### Per-request settings and reasoning
+
+`max_tokens`, `temperature` and `top_p` default to `LLMConfig`, but any call or batch item can override them with `RequestSettings`; `None` fields inherit. `reasoning` asks the model to think, and each formatter renders it natively:
+
+```python
+from llm_kit import BatchItem, Reasoning, ReasoningEffort, RequestSettings
+
+settings = RequestSettings(
+    temperature=0.0,
+    max_tokens=2000,
+    reasoning=Reasoning(effort=ReasoningEffort.HIGH),   # or Reasoning(budget_tokens=8000)
+)
+await llm.invoke(messages, settings=settings)
+BatchItem(id="a", messages=messages, settings=settings)   # per item, in one batch
+```
+
+| Provider | `effort` | `budget_tokens` |
+|---|---|---|
+| OpenAI | `reasoning_effort` | mapped to effort (<=1024 minimal, <=4096 low, <=16384 medium, else high) |
+| Anthropic | mapped to a budget (minimal 1024, low 2048, medium 8192, high 24576) | `thinking: {type: enabled, budget_tokens}` |
+| Gemini | `generationConfig.thinkingConfig.thinkingLevel` (always a level, never `thinkingBudget`) | mapped to a level as for OpenAI |
+
+If both are given, OpenAI/Gemini use `effort` and Anthropic uses `budget_tokens`. llm_kit does not strip `temperature` or adjust `max_tokens` for Anthropic thinking; the provider validates. Thinking content is never part of `response.text` (Gemini `thought` parts and Anthropic `thinking` blocks are dropped). `response.usage.reasoning_tokens` reports thinking tokens where the provider does (OpenAI, Gemini; Anthropic reports 0), and `total_tokens` always includes them. OpenAI includes them in `completion_tokens`; Gemini reports them separately from `completion_tokens`. `estimated_cost` prices output as `total_tokens - prompt_tokens` per item (`TokenUsage.output_tokens`), so thinking is billed at the completion rate exactly once for every provider.
+
+Precedence is `LLMConfig` < `settings` < `overrides`. `overrides` is deep-merged into the request body (dicts merge recursively; lists and scalars replace), so `overrides={"generationConfig": {"temperature": 0.9}}` leaves the response schema in place.
 
 ### Streaming
 
@@ -140,6 +181,24 @@ written = await llm.batch_to_jsonl(items, "out.jsonl", resume=True)
 
 There's also a provider-native 24h Batch API (≈50% cheaper) and an embeddings client with input micro-batching. See **[docs/batch.md](docs/batch.md)** and **[docs/embeddings.md](docs/embeddings.md)**.
 
+Gemini on **Vertex AI** (GCS-based batch prediction, Application Default Credentials) is available as the `vertex` batch backend behind an optional extra: `pip install "llm_kit[vertex]"` (`uv sync --extra vertex`), then `provider_batch.backend: vertex` with `llm.message_format: gemini`. See [docs/batch.md](docs/batch.md#vertex-ai-gemini-batch-backend); a manual real-project smoke test is in [docs/vertex_smoke_test.md](docs/vertex_smoke_test.md).
+
+### Testing offline batches without a network
+
+`llm_kit.testing.FakeBatchBackend` is an in-memory provider batch backend. Inject it and the whole `run_batch_api` / `submit_batch` / `fetch_batch_results` flow runs with no HTTP:
+
+```python
+from llm_kit import LLMClient
+from llm_kit.testing import FakeBatchBackend
+
+fake = FakeBatchBackend(polls_until_done=2, fail_items={"item-3": "boom"}, shuffle=True)
+llm = LLMClient(config, batch_backend=fake)
+await llm.run_batch_api(items, "out.jsonl", poll_interval=0)
+fake.submitted            # {batch_id: [BatchRequest, ...]} as the backend received them
+```
+
+Use `responder=` (callable or `{custom_id: body}`) or `FakeBatchBackend.text_responder(fmt, fn)` to shape responses, `fail_job=BatchState.EXPIRED` (with `raw_state=`, `error_detail=`, `partial_output=`) for whole-job failure, and `states=[BatchState.PAUSED, ...]` to script poll states. Fetching from a running job raises `BatchJobNotFinishedError` (or pass `wait=True`); a failed/expired/cancelled one raises `BatchJobFailedError` (or pass `allow_partial=True`). To bypass `BatchItem`, use `llm.submit_requests([BatchRequest(id, body)])` and `llm.fetch_raw_results(job)`. Details in [docs/batch.md](docs/batch.md).
+
 ## Documentation
 
 | Topic | |
@@ -190,4 +249,4 @@ benchmarks/      # load tests
 
 ## License
 
-Add your own.
+MIT. See [LICENSE](LICENSE).

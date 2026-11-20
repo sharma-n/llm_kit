@@ -44,7 +44,7 @@ from llm_kit.config.llm import LLMConfig
 from llm_kit.config.rate_limit import RateLimitConfig
 from llm_kit.llm.client import LLMClient
 from llm_kit.llm.response import BatchItem
-from llm_kit.messages.types import Message
+from llm_kit.messages.types import ImagePart, Message
 
 
 LATENCY_SECONDS = 3.0
@@ -125,7 +125,9 @@ def make_items(count: int) -> list[BatchItem]:
         items.append(
             BatchItem(
                 id=f"bench-{i:06d}",
-                messages=[Message.user(f"describe item {i}", image_urls=images)],
+                messages=[Message.user(
+                        f"describe item {i}", *(ImagePart.from_url(u) for u in images)
+                    )],
             )
         )
     return items

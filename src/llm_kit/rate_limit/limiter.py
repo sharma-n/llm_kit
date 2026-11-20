@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 from llm_kit.config.rate_limit import RateLimitConfig
-from llm_kit.messages.types import Message
+from llm_kit.messages.types import Message, TextPart
 
 TokenEstimator = Callable[[list[Message]], int]
 
@@ -142,10 +142,13 @@ class RateLimiter:
     def _default_estimator(self, messages: list[Message]) -> int:
         chars = 0
         for m in messages:
-            if m.text:
-                chars += len(m.text)
-            # Images: rough heuristic, since per-provider tile counts vary.
-            # 1000 tokens per image is the right order of magnitude for vision
-            # models; under-estimates will be corrected by true_up_tokens.
-            chars += 4000 * len(m.image_urls)
+            for part in m.parts:
+                if isinstance(part, TextPart):
+                    chars += len(part.text)
+                else:
+                    # Images: rough heuristic, since per-provider tile counts
+                    # vary. 1000 tokens per image is the right order of
+                    # magnitude for vision models; under-estimates will be
+                    # corrected by true_up_tokens.
+                    chars += 4000
         return max(1, int(chars / self._config.default_chars_per_token))

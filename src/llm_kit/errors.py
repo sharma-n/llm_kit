@@ -99,8 +99,58 @@ class ValidationError(LLMError):
         self.raw_content = raw_content
 
 
+class BatchJobNotFinishedError(LLMError):
+    """Results were requested from a provider batch job that is still running.
+
+    Pass ``wait=True`` to ``fetch_batch_results`` / ``fetch_raw_results`` (or poll
+    until ``BatchState.is_terminal``) first. ``raw_state`` is the provider's own
+    status string.
+    """
+
+    retryable = False
+
+    def __init__(self, *, batch_id: str, state: object, raw_state: str = "") -> None:
+        value = getattr(state, "value", state)
+        super().__init__(
+            f"batch job {batch_id} has not finished (state={value}, "
+            f"raw_state={raw_state!r}); pass wait=True or poll until it is terminal"
+        )
+        self.batch_id = batch_id
+        self.state = state
+        self.raw_state = raw_state
+
+
+class BatchJobFailedError(ProviderError):
+    """A provider batch job ended failed, expired or cancelled (job-level failure).
+
+    Never retryable. ``state`` is the normalized ``BatchState``, ``raw_state`` the
+    provider's own status string, ``detail`` the provider's error message if any.
+    Pass ``allow_partial=True`` to fetch whatever partial output the provider kept.
+    """
+
+    def __init__(
+        self,
+        *,
+        batch_id: str,
+        state: object,
+        raw_state: str = "",
+        detail: str | None = None,
+    ) -> None:
+        value = getattr(state, "value", state)
+        msg = f"batch job {batch_id} ended {value} (raw_state={raw_state!r})"
+        if detail:
+            msg += f": {detail}"
+        super().__init__(msg, retryable=False)
+        self.batch_id = batch_id
+        self.state = state
+        self.raw_state = raw_state
+        self.detail = detail
+
+
 __all__ = [
     "AuthError",
+    "BatchJobFailedError",
+    "BatchJobNotFinishedError",
     "ImageFetchError",
     "LLMError",
     "NetworkError",

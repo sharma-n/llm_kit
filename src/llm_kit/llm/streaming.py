@@ -21,10 +21,9 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel
-
 from llm_kit.llm.parsing import validate_text
 from llm_kit.llm.response import LLMResponse, TokenUsage
+from llm_kit.messages.schema import ResponseSchema
 from llm_kit.messages.streaming import (
     FinishFragment,
     MetaFragment,
@@ -94,6 +93,7 @@ class StreamAssembler:
                 prompt_tokens=fragment.prompt_tokens,
                 completion_tokens=fragment.completion_tokens,
                 total_tokens=fragment.total_tokens,
+                reasoning_tokens=fragment.reasoning_tokens,
             )
             return []
         if isinstance(fragment, FinishFragment):
@@ -126,7 +126,7 @@ class StreamAssembler:
     def finish(
         self,
         *,
-        response_model: type[BaseModel] | None = None,
+        response_model: ResponseSchema | None = None,
         latency_seconds: float = 0.0,
     ) -> StreamEnd:
         text = "".join(self._text)

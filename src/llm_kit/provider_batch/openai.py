@@ -120,6 +120,7 @@ class OpenAIBatchBackend:
             counts={k: int(v) for k, v in counts.items() if isinstance(v, int)},
             output_ref=data.get("output_file_id"),
             error_ref=data.get("error_file_id"),
+            error_detail=_error_detail(data.get("errors")),
         )
 
     # ---------------------------------------------------------------- results
@@ -192,6 +193,18 @@ class OpenAIBatchBackend:
         if not isinstance(data, dict):
             raise ProviderError(f"unexpected batch response shape: {type(data).__name__}")
         return data
+
+
+def _error_detail(errors: Any) -> str | None:
+    """Join the batch object's ``errors.data[*].message`` (job-level, not per-item)."""
+    if not isinstance(errors, dict):
+        return None
+    msgs = [
+        str(e["message"])
+        for e in errors.get("data") or []
+        if isinstance(e, dict) and e.get("message")
+    ]
+    return "; ".join(msgs) or None
 
 
 def _result_line_to_raw(record: dict[str, Any]) -> RawResult:

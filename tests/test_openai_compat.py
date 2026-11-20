@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from llm_kit.config.llm import StructuredOutputStyle
 from llm_kit.errors import AuthError, ProviderError, ValidationError
 from llm_kit.llm.client import LLMClient
-from llm_kit.messages.types import Message
+from llm_kit.messages.types import ImagePart, Message
 
 from conftest import chat_response, make_config, mock_client, tool_use_response
 
@@ -233,7 +233,7 @@ async def test_image_in_message_is_base64_encoded_in_request() -> None:
     llm, _ = _make_llm(handler)
     async with llm:
         await llm.invoke(
-            [Message.user("look:", image_urls=["http://x/image.png"])]
+            [Message.user("look:", ImagePart.from_url("http://x/image.png"))]
         )
 
     assert captured_body is not None

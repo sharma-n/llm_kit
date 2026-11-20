@@ -16,7 +16,11 @@ A request must acquire all configured gates before being issued.
 
 ## Multimodal images
 
-URLs in `Message.image_urls` are fetched in parallel by a shared `ImageFetcher`:
+A message is an ordered list of `parts` (`TextPart` / `ImagePart`); formatters emit them in exactly that order, one wire block per part. `Message.user("look", ImagePart.from_url(u), "and", ImagePart.from_bytes(png, "image/png"))` builds it.
+
+- `ImagePart.from_bytes(data, mime_type)` is base64-encoded once (on a thread above `threadpool_encode_threshold_bytes`) and never fetched or cached.
+- `ImagePart.from_url("data:<mime>;base64,...")` is validated and used as is: no network, not cached. A malformed data URL raises `ImageFetchError`, subject to `image.on_failure` like any fetch failure.
+- http(s) URLs are fetched in parallel by a shared `ImageFetcher`:
 
 - **Concurrent**, bounded by `ImageConfig.max_concurrent_downloads`.
 - **Cached** in an in-memory LRU keyed by URL — duplicate URLs across a batch resolve once.

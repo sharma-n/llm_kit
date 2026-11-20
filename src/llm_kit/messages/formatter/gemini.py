@@ -6,10 +6,10 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
-from pydantic import BaseModel
-
 from llm_kit.errors import ProviderError
-from llm_kit.messages.formatter._shared import parse_arguments
+from llm_kit.messages.formatter._shared import message_text, parse_arguments, resolve_effort
+from llm_kit.messages.schema import ResponseSchema, json_schema
+from llm_kit.messages.settings import Reasoning
 from llm_kit.messages.streaming import (
     FinishFragment,
     MetaFragment,
@@ -19,7 +19,7 @@ from llm_kit.messages.streaming import (
     UsageFragment,
 )
 from llm_kit.messages.tools import ToolCall, ToolDefinition
-from llm_kit.messages.types import Message, Role
+from llm_kit.messages.types import ImagePart, Message, Role, TextPart
 
 
 def _gemini_tool_config(
@@ -70,6 +70,15 @@ def _data_url_to_gemini_image(data_url: str) -> dict[str, Any] | None:
     return {"inlineData": {"mimeType": media_type, "data": b64_data}}
 
 
+def _gemini_usage(um: Any) -> tuple[int, int, int, int]:
+    um = um or {}
+    prompt = int(um.get("promptTokenCount", 0) or 0)
+    completion = int(um.get("candidatesTokenCount", 0) or 0)
+    reasoning = int(um.get("thoughtsTokenCount", 0) or 0)
+    total = int(um.get("totalTokenCount", 0) or 0) or prompt + completion + reasoning
+    return prompt, completion, total, reasoning
+
+
 class GeminiFormatter:
     """Google Gemini generateContent wire format (request + response).
 
@@ -87,7 +96,7 @@ class GeminiFormatter:
     def format_messages(
         self,
         messages: list[Message],
-        encoded_images: dict[str, str],
+        encoded_images: dict[ImagePart, str],
     ) -> list[dict[str, Any]]:
         """Build the ``contents`` array, excluding system messages.
 
@@ -121,7 +130,7 @@ class GeminiFormatter:
                     {
                         "functionResponse": {
                             "name": names_by_id.get(call_id, call_id),
-                            "response": _gemini_tool_response(msg.text or ""),
+                            "response": _gemini_tool_response(message_text(msg)),
                         }
                     }
                 )
@@ -141,16 +150,20 @@ class GeminiFormatter:
         return out
 
     def system_prompt(self, messages: list[Message]) -> str | None:
-        texts = [msg.text or "" for msg in messages if msg.role is Role.SYSTEM]
+        texts = [message_text(msg) for msg in messages if msg.role is Role.SYSTEM]
         return "\n\n".join(texts) if texts else None
 
-    def structured_output_fields(self, model: type[BaseModel] | None) -> dict[str, Any]:
-        """Return ``generationConfig`` fields for structured output (merged by build_body)."""
+    def structured_output_fields(self, model: ResponseSchema | None) -> dict[str, Any]:
+        """Return ``generationConfig`` fields for structured output (merged by build_body).
+
+        Both Pydantic classes and dict schemas go in ``responseJsonSchema`` (not
+        the OpenAPI-subset ``responseSchema``) so ``$ref`` / ``$defs`` work.
+        """
         if model is None:
             return {}
         return {
             "responseMimeType": "application/json",
-            "responseSchema": model.model_json_schema(),
+            "responseJsonSchema": json_schema(model),
         }
 
     def default_headers(self, api_key: str | None) -> dict[str, str]:
@@ -184,7 +197,8 @@ class GeminiFormatter:
         top_p: float | None,
         max_tokens: int | None,
         extra_sampling: dict[str, Any],
-        response_model: type[BaseModel] | None,
+        response_model: ResponseSchema | None,
+        reasoning: Reasoning | None = None,
         tools: list[ToolDefinition] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         stream: bool = False,
@@ -204,6 +218,13 @@ class GeminiFormatter:
             gen_config["maxOutputTokens"] = max_tokens
         gen_config.update(extra_sampling)
         gen_config.update(self.structured_output_fields(response_model))
+        effort = resolve_effort(reasoning)
+        if effort is not None:
+            # Gemini 3.x+ takes ``thinkingLevel`` (``thinkingBudget`` is gone);
+            # merge so an ``includeThoughts`` from extra_sampling survives.
+            thinking = dict(gen_config.get("thinkingConfig") or {})
+            thinking["thinkingLevel"] = effort.value
+            gen_config["thinkingConfig"] = thinking
         if gen_config:
             body["generationConfig"] = gen_config
         if tools:
@@ -233,16 +254,21 @@ class GeminiFormatter:
             raise ProviderError(
                 f"unexpected Gemini response shape: {data!r}", cause=exc
             ) from exc
+        # Skip thought-summary parts (``"thought": true``): they are not the answer.
         return "".join(
-            p.get("text", "") for p in parts if isinstance(p, dict)
+            p.get("text", "")
+            for p in parts
+            if isinstance(p, dict) and not p.get("thought")
         )
 
-    def extract_usage(self, data: dict[str, Any]) -> tuple[int, int, int]:
-        """Return ``(prompt_tokens, completion_tokens, total_tokens)``."""
-        um = data.get("usageMetadata") or {}
-        prompt = int(um.get("promptTokenCount", 0) or 0)
-        completion = int(um.get("candidatesTokenCount", 0) or 0)
-        return prompt, completion, prompt + completion
+    def extract_usage(self, data: dict[str, Any]) -> tuple[int, int, int, int]:
+        """Return ``(prompt, completion, total, reasoning)``.
+
+        ``candidatesTokenCount`` excludes thinking; ``thoughtsTokenCount`` is
+        reported separately. ``total`` prefers the provider's
+        ``totalTokenCount``, else prompt + candidates + thoughts.
+        """
+        return _gemini_usage(data.get("usageMetadata"))
 
     def finish_reason(self, data: dict[str, Any]) -> str | None:
         try:
@@ -316,7 +342,7 @@ class GeminiFormatter:
                     if not isinstance(part, dict):
                         continue
                     text = part.get("text")
-                    if text:
+                    if text and not part.get("thought"):
                         yield TextFragment(text=text)
                     fc = part.get("functionCall")
                     if isinstance(fc, dict):
@@ -333,13 +359,12 @@ class GeminiFormatter:
 
             usage = chunk.get("usageMetadata")
             if usage:
-                prompt = int(usage.get("promptTokenCount", 0) or 0)
-                completion = int(usage.get("candidatesTokenCount", 0) or 0)
-                total = int(usage.get("totalTokenCount", 0) or 0) or prompt + completion
+                prompt, completion, total, reasoning = _gemini_usage(usage)
                 yield UsageFragment(
                     prompt_tokens=prompt,
                     completion_tokens=completion,
                     total_tokens=total,
+                    reasoning_tokens=reasoning,
                 )
 
     # ------------------------------------------------------------------ private
@@ -347,13 +372,15 @@ class GeminiFormatter:
     def _build_parts(
         self,
         msg: Message,
-        encoded_images: dict[str, str],
+        encoded_images: dict[ImagePart, str],
     ) -> list[dict[str, Any]]:
         parts: list[dict[str, Any]] = []
-        if msg.text:
-            parts.append({"text": msg.text})
-        for url in msg.image_urls:
-            data_url = encoded_images.get(url)
+        for part in msg.parts:
+            if isinstance(part, TextPart):
+                if part.text:  # Gemini rejects empty text parts
+                    parts.append({"text": part.text})
+                continue
+            data_url = encoded_images.get(part)
             if data_url is None:
                 continue
             image_part = _data_url_to_gemini_image(data_url)

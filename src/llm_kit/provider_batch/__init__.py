@@ -9,18 +9,23 @@ reconciled. See ``backend.BatchBackend`` for the transport abstraction and
 
 from llm_kit.provider_batch.backend import BatchBackend
 from llm_kit.provider_batch.job import BatchJob
+from llm_kit.provider_batch.registry import BackendFactory, register_batch_backend
 from llm_kit.provider_batch.types import (
     BatchJobStatus,
     BatchRequest,
     BatchState,
     RawResult,
+    SubmitResult,
 )
 
 __all__ = [
+    "BackendFactory",
     "BatchBackend",
     "BatchJob",
     "BatchJobStatus",
     "BatchRequest",
     "BatchState",
     "RawResult",
+    "SubmitResult",
+    "register_batch_backend",
 ]

@@ -17,15 +17,19 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Protocol, runtime_checkable
 
-from llm_kit.provider_batch.types import BatchJobStatus, BatchRequest, RawResult
+from llm_kit.provider_batch.types import BatchJobStatus, BatchRequest, RawResult, SubmitResult
 
 
 @runtime_checkable
 class BatchBackend(Protocol):
     """Provider transport for an offline batch job."""
 
-    async def submit(self, requests: list[BatchRequest]) -> str:
-        """Upload/submit all requests; return the provider batch id."""
+    async def submit(self, requests: list[BatchRequest]) -> str | SubmitResult:
+        """Upload/submit all requests.
+
+        Return the provider batch id, or a ``SubmitResult`` when the backend also
+        has JSON-serialisable state to persist on ``BatchJob.extra``.
+        """
         ...
 
     async def poll(self, batch_id: str) -> BatchJobStatus:

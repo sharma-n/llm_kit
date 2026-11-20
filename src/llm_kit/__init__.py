@@ -5,6 +5,8 @@ from llm_kit.embed.client import OpenAICompatibleEmbedder
 from llm_kit.embed.response import EmbeddingResponse, EmbeddingResult, EmbedItem
 from llm_kit.errors import (
     AuthError,
+    BatchJobFailedError,
+    BatchJobNotFinishedError,
     ImageFetchError,
     LLMError,
     NetworkError,
@@ -25,18 +27,30 @@ from llm_kit.llm.response import (
     ToolDefinition,
 )
 from llm_kit.llm.streaming import StreamEnd, StreamEvent, TextChunk, ToolCallStarted
-from llm_kit.messages.types import Message
+from llm_kit.messages.schema import ResponseSchema
+from llm_kit.messages.settings import Reasoning, ReasoningEffort, RequestSettings
+from llm_kit.messages.types import ImagePart, Message, Part, TextPart
 from llm_kit.provider_batch.job import BatchJob
-from llm_kit.provider_batch.types import BatchJobStatus, BatchState
+from llm_kit.provider_batch.registry import register_batch_backend
+from llm_kit.provider_batch.types import (
+    BatchJobStatus,
+    BatchRequest,
+    BatchState,
+    RawResult,
+    SubmitResult,
+)
 
 __all__ = [
     "AppConfig",
     "AuthError",
     "BaseLLM",
     "BatchItem",
+    "BatchJobFailedError",
+    "BatchJobNotFinishedError",
     "BatchJob",
     "BatchSummary",
     "BatchJobStatus",
+    "BatchRequest",
     "BatchResult",
     "BatchState",
     "EmbedItem",
@@ -45,12 +59,20 @@ __all__ = [
     "ImageFetchError",
     "LLMError",
     "LLMResponse",
+    "ImagePart",
     "Message",
+    "Part",
+    "TextPart",
     "NetworkError",
     "LLMClient",
     "OpenAICompatibleEmbedder",
     "ProviderError",
+    "Reasoning",
+    "ReasoningEffort",
+    "RequestSettings",
+    "ResponseSchema",
     "StreamEnd",
+    "SubmitResult",
     "StreamEvent",
     "TextChunk",
     "ToolCall",
@@ -58,6 +80,8 @@ __all__ = [
     "ToolDefinition",
     "UsageLedger",
     "RateLimitError",
+    "RawResult",
     "TimeoutError",
     "ValidationError",
+    "register_batch_backend",
 ]
