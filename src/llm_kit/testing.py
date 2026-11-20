@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable, Iterable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 from llm_kit.config.llm import MessageFormat
@@ -35,7 +35,13 @@ class FakeBatchBackend:
         fail_items: custom_ids that yield a per-item error (an iterable uses a
             default message; a mapping gives the message per id).
         fail_job: if set, the job ends in this (terminal, non-completed) state
-            instead of ``COMPLETED``, with ``raw_state`` as the provider string.
+            instead of ``COMPLETED``, with ``raw_state`` as the provider string and
+            ``error_detail`` as the provider's failure message.
+        partial_output: with ``fail_job``, expose the (otherwise complete) results as
+            partial output so ``allow_partial=True`` fetches yield them.
+        states: scripted states for successive polls (e.g. ``[PAUSED, PAUSED]``);
+            once exhausted, polling falls through to the normal final state. A
+            terminal entry ends the job in that state. Overrides ``polls_until_done``.
         shuffle: yield results in reverse submission order.
     """
 
@@ -49,11 +55,17 @@ class FakeBatchBackend:
         fail_items: Mapping[str, str] | Iterable[str] = (),
         fail_job: BatchState | None = None,
         raw_state: str = "",
+        error_detail: str | None = None,
+        partial_output: bool = False,
+        states: Sequence[BatchState] | None = None,
         shuffle: bool = False,
     ) -> None:
         self.polls_until_done = polls_until_done
         self.fail_job = fail_job
         self.raw_state = raw_state
+        self.error_detail = error_detail
+        self.partial_output = partial_output
+        self.states = list(states) if states else []
         self.shuffle = shuffle
         if responder is None:
             responder = self.text_responder(
@@ -85,11 +97,26 @@ class FakeBatchBackend:
         n = len(self.submitted[batch_id])
         if batch_id in self.cancelled:
             return BatchJobStatus(BatchState.CANCELLED, "cancelled", output_ref=batch_id)
-        if self.poll_counts[batch_id] < self.polls_until_done:
+        poll_n = self.poll_counts[batch_id]
+        if self.states:
+            if poll_n <= len(self.states):
+                scripted = self.states[poll_n - 1]
+                if scripted.is_terminal:
+                    return self._final_status(batch_id, scripted)
+                return BatchJobStatus(scripted, scripted.value, {"total": n})
+        elif poll_n < self.polls_until_done:
             return BatchJobStatus(BatchState.IN_PROGRESS, "in_progress", {"total": n})
-        if self.fail_job is not None:
+        return self._final_status(batch_id, self.fail_job or BatchState.COMPLETED)
+
+    def _final_status(self, batch_id: str, state: BatchState) -> BatchJobStatus:
+        n = len(self.submitted[batch_id])
+        if state is not BatchState.COMPLETED:
             return BatchJobStatus(
-                self.fail_job, self.raw_state or self.fail_job.value, {"total": n}
+                state,
+                self.raw_state or state.value,
+                {"total": n},
+                output_ref=batch_id if self.partial_output else None,
+                error_detail=self.error_detail,
             )
         failed = sum(1 for r in self.submitted[batch_id] if r.custom_id in self.fail_items)
         return BatchJobStatus(

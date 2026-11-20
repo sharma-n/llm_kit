@@ -74,11 +74,25 @@ class AnthropicBatchBackend:
         data = self._parse(response)
         raw_state = str(data.get("processing_status", ""))
         counts = data.get("request_counts") or {}
+        state = _STATE_MAP.get(raw_state, BatchState.IN_PROGRESS)
+        detail: str | None = None
+        # Anthropic has no job-level failure: a cancelled batch just ends, with
+        # cancel_initiated_at set and some items reported as ``canceled``. Report
+        # CANCELLED only when cancellation actually cost items; a late cancel that
+        # lost the race (nothing canceled) is a normal COMPLETED job.
+        if (
+            state is BatchState.COMPLETED
+            and data.get("cancel_initiated_at")
+            and int(counts.get("canceled") or 0) > 0
+        ):
+            state = BatchState.CANCELLED
+            detail = f"cancel initiated at {data['cancel_initiated_at']}"
         return BatchJobStatus(
-            state=_STATE_MAP.get(raw_state, BatchState.IN_PROGRESS),
+            state=state,
             raw_state=raw_state,
             counts={k: int(v) for k, v in counts.items() if isinstance(v, int)},
-            output_ref=data.get("results_url"),
+            output_ref=data.get("results_url"),  # partial results stay readable
+            error_detail=detail,
         )
 
     async def fetch_results(self, status: BatchJobStatus) -> AsyncIterator[RawResult]:

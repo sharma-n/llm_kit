@@ -21,7 +21,13 @@ import httpx
 from llm_kit.batch.processor import run_batch_stream
 from llm_kit.config.app import AppConfig
 from llm_kit.config.llm import MessageFormat
-from llm_kit.errors import AuthError, LLMError, ProviderError
+from llm_kit.errors import (
+    AuthError,
+    BatchJobFailedError,
+    BatchJobNotFinishedError,
+    LLMError,
+    ProviderError,
+)
 from llm_kit.http.retry import retry_request, retry_stream
 from llm_kit.http.session import build_async_client
 from llm_kit.images.fetcher import ImageFetcher
@@ -41,6 +47,7 @@ from llm_kit.provider_batch.registry import backend_name, build_backend
 from llm_kit.provider_batch.types import (
     BatchJobStatus,
     BatchRequest,
+    BatchState,
     RawResult,
     SubmitResult,
 )
@@ -305,22 +312,91 @@ class LLMClient(BaseLLM):
                 self._batch_backend_name,
             )
 
+    def _interval(self, poll_interval: float | None) -> float:
+        if poll_interval is not None:
+            return poll_interval
+        return self._config.provider_batch.poll_interval_seconds
+
+    async def _wait_until_terminal(
+        self,
+        job: BatchJob,
+        *,
+        poll_interval: float | None = None,
+        status: BatchJobStatus | None = None,
+    ) -> BatchJobStatus:
+        """Poll until the job reaches a terminal state (PAUSED counts as waiting)."""
+        interval = self._interval(poll_interval)
+        if status is None:
+            status = await self._batch_backend.poll(job.batch_id)
+        while not status.state.is_terminal:
+            await asyncio.sleep(interval)
+            status = await self._batch_backend.poll(job.batch_id)
+        return status
+
+    @staticmethod
+    def _require_fetchable(
+        job: BatchJob, status: BatchJobStatus, *, allow_partial: bool
+    ) -> None:
+        """Raise unless ``status`` is COMPLETED (or a failed end with ``allow_partial``)."""
+        if status.state is BatchState.COMPLETED:
+            return
+        if not status.state.is_terminal:
+            raise BatchJobNotFinishedError(
+                batch_id=job.batch_id, state=status.state, raw_state=status.raw_state
+            )
+        if not allow_partial:
+            raise BatchJobFailedError(
+                batch_id=job.batch_id,
+                state=status.state,
+                raw_state=status.raw_state,
+                detail=status.error_detail,
+            )
+
     async def _fetch_raw(
-        self, job: BatchJob, status: BatchJobStatus | None = None
+        self,
+        job: BatchJob,
+        status: BatchJobStatus | None = None,
+        *,
+        wait: bool = False,
+        poll_interval: float | None = None,
+        allow_partial: bool = False,
     ) -> AsyncIterator[RawResult]:
         """The single place results are pulled from the backend.
 
-        Polls for a fresh status unless the caller already holds one.
+        Polls for a fresh status unless the caller already holds one, and enforces
+        the terminal-state contract: a non-terminal job raises
+        ``BatchJobNotFinishedError`` (unless ``wait``), and a failed/expired/
+        cancelled one raises ``BatchJobFailedError`` (unless ``allow_partial``,
+        which yields whatever output the backend still exposes).
         """
         self._check_job_backend(job)
         if status is None:
             status = await self._batch_backend.poll(job.batch_id)
+        if wait and not status.state.is_terminal:
+            status = await self._wait_until_terminal(
+                job, poll_interval=poll_interval, status=status
+            )
+        self._require_fetchable(job, status, allow_partial=allow_partial)
         async for raw in self._batch_backend.fetch_results(status):
             yield raw
 
-    async def fetch_raw_results(self, job: BatchJob) -> AsyncIterator[RawResult]:
-        """Yield the provider's per-request results for ``job`` without parsing."""
-        async for raw in self._fetch_raw(job):
+    async def fetch_raw_results(
+        self,
+        job: BatchJob,
+        *,
+        wait: bool = False,
+        poll_interval: float | None = None,
+        allow_partial: bool = False,
+    ) -> AsyncIterator[RawResult]:
+        """Yield the provider's per-request results for ``job`` without parsing.
+
+        Raises ``BatchJobNotFinishedError`` if the job is still running (unless
+        ``wait=True``) and ``BatchJobFailedError`` if it ended failed/expired/
+        cancelled (unless ``allow_partial=True``). Raised on first iteration.
+        """
+        async for raw in self._fetch_raw(
+            job, wait=wait, poll_interval=poll_interval, allow_partial=allow_partial
+        ):
             yield raw
 
     async def poll_batch(self, job: BatchJob) -> BatchJobStatus:
@@ -329,7 +405,13 @@ class LLMClient(BaseLLM):
         return await self._batch_backend.poll(job.batch_id)
 
     async def fetch_batch_results(
-        self, job: BatchJob, *, items: list[BatchItem] | None = None
+        self,
+        job: BatchJob,
+        *,
+        items: list[BatchItem] | None = None,
+        wait: bool = False,
+        poll_interval: float | None = None,
+        allow_partial: bool = False,
     ) -> AsyncIterator[BatchResult]:
         """Download and reconcile results for ``job`` into ``BatchResult``s.
 
@@ -337,10 +419,18 @@ class LLMClient(BaseLLM):
         ``items``, a dict schema persisted in the job manifest is used. Otherwise
         (Pydantic class, no items) results come back as raw text. Metadata is
         always restored from the job manifest.
+
+        A job still running raises ``BatchJobNotFinishedError`` unless ``wait=True``
+        (polls every ``poll_interval`` seconds, default from config). A job that
+        ended failed/expired/cancelled raises ``BatchJobFailedError`` (carrying the
+        provider's raw state) unless ``allow_partial=True``. Errors surface on
+        first iteration.
         """
         response_models = self._response_models_for(job, items)
         metadata = {cid: job.metadata_for(cid) for cid in job.manifest}
-        raw = self._fetch_raw(job)
+        raw = self._fetch_raw(
+            job, wait=wait, poll_interval=poll_interval, allow_partial=allow_partial
+        )
         async for result in reconcile(
             raw, self._formatter, response_models=response_models, metadata=metadata
         ):
@@ -353,6 +443,7 @@ class LLMClient(BaseLLM):
         *,
         poll_interval: float | None = None,
         resume_job: BatchJob | None = None,
+        allow_partial: bool = False,
     ) -> int:
         """Submit, poll to completion, and write reconciled results to jsonl.
 
@@ -361,21 +452,19 @@ class LLMClient(BaseLLM):
         submitted job instead of submitting again. Two-level resume: the saved
         handle reconnects to the in-flight job, and ids already present in
         ``output_path`` are skipped on write.
+
+        If the job ends failed/expired/cancelled, ``BatchJobFailedError`` is raised
+        *before* ``output_path`` is created or opened (an existing file is left
+        untouched) unless ``allow_partial=True``, which writes whatever partial
+        output the provider kept.
         """
         from llm_kit.batch.jsonl import load_completed_ids, write_results_to_jsonl
 
-        interval = (
-            poll_interval
-            if poll_interval is not None
-            else self._config.provider_batch.poll_interval_seconds
-        )
         job = resume_job or await self.submit_batch(items)
         self._check_job_backend(job)
 
-        status = await self._batch_backend.poll(job.batch_id)
-        while not status.state.is_terminal:
-            await asyncio.sleep(interval)
-            status = await self._batch_backend.poll(job.batch_id)
+        status = await self._wait_until_terminal(job, poll_interval=poll_interval)
+        self._require_fetchable(job, status, allow_partial=allow_partial)
 
         path = Path(output_path)
         completed = load_completed_ids(path) if path.exists() else set()
@@ -383,7 +472,7 @@ class LLMClient(BaseLLM):
             logger.info("resuming: %d items already in %s", len(completed), path)
         response_models = self._response_models_for(job, items)
         metadata = {cid: job.metadata_for(cid) for cid in job.manifest}
-        raw = self._fetch_raw(job, status)
+        raw = self._fetch_raw(job, status, allow_partial=allow_partial)
         results = reconcile(
             raw, self._formatter, response_models=response_models, metadata=metadata
         )

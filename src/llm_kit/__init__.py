@@ -5,6 +5,8 @@ from llm_kit.embed.client import OpenAICompatibleEmbedder
 from llm_kit.embed.response import EmbeddingResponse, EmbeddingResult, EmbedItem
 from llm_kit.errors import (
     AuthError,
+    BatchJobFailedError,
+    BatchJobNotFinishedError,
     ImageFetchError,
     LLMError,
     NetworkError,
@@ -43,6 +45,8 @@ __all__ = [
     "AuthError",
     "BaseLLM",
     "BatchItem",
+    "BatchJobFailedError",
+    "BatchJobNotFinishedError",
     "BatchJob",
     "BatchSummary",
     "BatchJobStatus",

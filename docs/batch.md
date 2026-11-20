@@ -60,9 +60,24 @@ job.save("job.json")                        # persist the handle (batch_id + man
 # ...later, in a fresh process...
 job = BatchJob.load("job.json")
 status = await llm.poll_batch(job)          # BatchJobStatus(state=..., counts=...)
-if status.state.is_terminal:
+if status.state.is_terminal:  # else raises BatchJobNotFinishedError (or pass wait=True)
     async for result in llm.fetch_batch_results(job, items=items):
         ...
+```
+
+### Unfinished and failed jobs
+
+Fetching checks the job's state first (in one place, `LLMClient._fetch_raw`, so `fetch_batch_results`, `fetch_raw_results` and `run_batch_api` all behave alike):
+
+- **Still running** (`PENDING`, `IN_PROGRESS`, `PAUSED`): raises `BatchJobNotFinishedError` (`batch_id`, `state`, `raw_state`). Pass `wait=True` (and optionally `poll_interval=`) to poll until terminal instead; `PAUSED` is non-terminal, so waiting continues through it.
+- **Ended `FAILED` / `EXPIRED` / `CANCELLED`**: raises `BatchJobFailedError` (`batch_id`, `state`, `raw_state` = the provider's own status string, `detail` = the provider's error message when it exposes one, also on `BatchJobStatus.error_detail`). It is a `ProviderError` and never retryable. Pass `allow_partial=True` to fetch whatever partial output the backend kept instead (OpenAI expired/cancelled and Anthropic cancelled keep it; Gemini failed/expired/cancelled and OpenAI failed usually yield nothing).
+- `run_batch_api(..., allow_partial=False)` raises *before* creating or opening `output_path`, so a failed job leaves no file and does not clobber an existing one.
+
+These are raised on first iteration of the async generators, not when they are called. Backend state mapping: OpenAI `cancelling` stays `IN_PROGRESS` until `cancelled`; Anthropic has no job-level failure, so `ended` is `COMPLETED`, except an ended batch with `cancel_initiated_at` set and at least one `canceled` item, which is `CANCELLED`; Gemini accepts both `JOB_STATE_*` and `BATCH_STATE_*` names, with `PAUSED` mapped to `BatchState.PAUSED`.
+
+```python
+status = await llm.poll_batch(job)
+results = [r async for r in llm.fetch_batch_results(job, items=items, wait=True, poll_interval=60)]
 ```
 
 A **dict** `response_model` (JSON schema) is persisted in the handle's manifest, so a fresh process decodes results without the original items. A **Pydantic** class is a Python type and isn't persisted — re-supply `items` at fetch time to validate against it (items win over the manifest; metadata is restored from the manifest either way). Per-item `settings` are baked into each request body at submit time. Handles saved before schemas were persisted still load. Results come back as the same `BatchResult` records the live pipeline yields, so the jsonl output and resume-skip behavior are identical. See [examples/provider_batch.py](../examples/provider_batch.py).

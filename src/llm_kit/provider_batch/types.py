@@ -19,6 +19,7 @@ class BatchState(StrEnum):
 
     PENDING = "pending"  # accepted, validating, or queued — not started
     IN_PROGRESS = "in_progress"  # actively running or finalizing
+    PAUSED = "paused"  # held by the provider (non-terminal; may resume) — wait through it
     COMPLETED = "completed"  # finished; results available
     FAILED = "failed"  # terminal failure of the whole job
     EXPIRED = "expired"  # completion window elapsed
@@ -80,3 +81,5 @@ class BatchJobStatus:
     # Provider handles the driver needs to fetch results, kept opaque here.
     output_ref: str | None = None  # e.g. OpenAI output_file_id / Anthropic results_url
     error_ref: str | None = None  # e.g. OpenAI error_file_id
+    # Provider's human-readable reason for a job-level failure, where it exposes one.
+    error_detail: str | None = None

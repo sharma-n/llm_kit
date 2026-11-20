@@ -195,7 +195,7 @@ await llm.run_batch_api(items, "out.jsonl", poll_interval=0)
 fake.submitted            # {batch_id: [BatchRequest, ...]} as the backend received them
 ```
 
-Use `responder=` (callable or `{custom_id: body}`) or `FakeBatchBackend.text_responder(fmt, fn)` to shape responses, and `fail_job=BatchState.EXPIRED` for whole-job failure. To bypass `BatchItem`, use `llm.submit_requests([BatchRequest(id, body)])` and `llm.fetch_raw_results(job)`. Details in [docs/batch.md](docs/batch.md).
+Use `responder=` (callable or `{custom_id: body}`) or `FakeBatchBackend.text_responder(fmt, fn)` to shape responses, `fail_job=BatchState.EXPIRED` (with `raw_state=`, `error_detail=`, `partial_output=`) for whole-job failure, and `states=[BatchState.PAUSED, ...]` to script poll states. Fetching from a running job raises `BatchJobNotFinishedError` (or pass `wait=True`); a failed/expired/cancelled one raises `BatchJobFailedError` (or pass `allow_partial=True`). To bypass `BatchItem`, use `llm.submit_requests([BatchRequest(id, body)])` and `llm.fetch_raw_results(job)`. Details in [docs/batch.md](docs/batch.md).
 
 ## Documentation
 

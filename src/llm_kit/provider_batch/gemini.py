@@ -43,7 +43,12 @@ _STATE_MAP: dict[str, BatchState] = {
     "JOB_STATE_FAILED": BatchState.FAILED,
     "JOB_STATE_CANCELLED": BatchState.CANCELLED,
     "JOB_STATE_EXPIRED": BatchState.EXPIRED,
+    "JOB_STATE_PAUSED": BatchState.PAUSED,
 }
+# The Gemini Batch API's own enum spells the same states BATCH_STATE_*.
+_STATE_MAP.update(
+    {k.replace("JOB_STATE_", "BATCH_STATE_"): v for k, v in list(_STATE_MAP.items())}
+)
 
 
 class GeminiBatchBackend:
@@ -93,9 +98,16 @@ class GeminiBatchBackend:
             state = BatchState.COMPLETED if data.get("done") else BatchState.IN_PROGRESS
             if data.get("done") and data.get("error"):
                 state = BatchState.FAILED
+        error = data.get("error") or (data.get("metadata") or {}).get("error")
+        detail = None
+        if isinstance(error, dict):
+            detail = str(error.get("message") or error) or None
+        elif error:
+            detail = str(error)
         return BatchJobStatus(
             state=state,
             raw_state=raw_state or ("done" if data.get("done") else "running"),
+            error_detail=detail,
             # Results live on the operation itself; re-fetch it to read them.
             output_ref=batch_id if state is BatchState.COMPLETED else None,
         )
